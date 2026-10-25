@@ -25,6 +25,8 @@ import {
 import { registerRendererProtocol, setProtocolReporter } from "./protocol"
 import { loadWindow } from "./scheme"
 import { createWindowRegistry } from "./registry"
+// SAFETY: window recovery is a per-window wiring helper built once here, not a contextual capability.
+// oxlint-disable-next-line anti-slop-effect/no-service-constructor-imports -- see SAFETY above
 import { makeWindowRecovery } from "./recovery"
 import { takeEarlyWindow, type EarlyWindow } from "./early"
 import { manageWindowState, readWindowState, resolveWindowState, windowStateFile } from "./window-state"
@@ -94,6 +96,11 @@ export function getWindowByID(id: string) {
   if (!win || win.isDestroyed()) return null
 
   return win
+}
+
+/** The persisted ID of an app window, or nothing for popups and other native windows. */
+export function getWindowID(win: BrowserWindow) {
+  return registry.persisted().find((id) => registry.get(id) === win)
 }
 
 /** App windows that host the renderer, excluding popups and other native windows. */
@@ -235,5 +242,3 @@ export const makeMainWindows = Effect.fn("Window.make")(function* () {
 
   return { create, restore }
 })
-
-
