@@ -97,6 +97,18 @@ const fadeOut = motionTuning.number("question.fade-out", {
   step: 0.05,
 })
 
+// A switch starts at this multiple of the spring's natural speed instead of from rest, so it answers the key at once;
+// at 1 it eases out like an exponential, and up to 1 it never overshoots.
+const launch = motionTuning.number("question.launch", {
+  label: "Launch speed",
+  group,
+  subsection,
+  value: 1,
+  min: 0,
+  max: 1,
+  step: 0.05,
+})
+
 const fade: DurationOptions = { duration: 0.2, bounce: 0 }
 
 type QuestionField = FormStringField | FormMultiselectField
@@ -744,6 +756,13 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
     const dir = root?.matches(":dir(rtl)") ? -step : step
     const from = entering ? enteringFrame(entering) : { x: 0, opacity: 1 }
     const options = prefersReducedMotion() ? fade : slide()
+
+    const start = () => {
+      const spring = Spring.fromDuration(0, options)
+
+      return spring.set(1, { velocity: spring.omega * launch() })
+    }
+
     setStore({
       ghostDetails: Math.max(store.ghostDetails, store.detailsHeight),
       ghostList: Math.max(store.ghostList, store.listHeight),
@@ -751,12 +770,12 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
     })
     ghosts.push({
       els: [ghost(detailsRef, detailsFrame), ghost(listRef, optionsRef)],
-      spring: Spring.fromDuration(0, options).set(1),
+      spring: start(),
       dir,
       x: from.x,
       opacity: from.opacity,
     })
-    entering = { spring: Spring.fromDuration(0, options).set(1), dir }
+    entering = { spring: start(), dir }
   }
 
   onCleanup(observeReducedMotion(() => prefersReducedMotion() && stopSwitch && settleSwitch()))
