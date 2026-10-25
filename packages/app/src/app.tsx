@@ -15,6 +15,7 @@ import { LanguageProvider, UiI18nBridge, type Locale } from "@/runtime/i18n/lang
 import { ServerConnection, ServersProvider } from "@/runtime/server/registry"
 import { SettingsProvider } from "@/settings/model"
 import { TabsProvider } from "@/shell/tabs/tabs"
+import { SessionLinks } from "@/shell/links/links"
 import { ErrorPage } from "@/shell/errors/error"
 import { AppRoutes, File, preloadRoute } from "@/shell/routes/routes"
 import { ExtensionRoot } from "@/runtime/extension/root"
@@ -99,6 +100,7 @@ export function AppInterface(props: {
         <BodyTypography />
         <CommandProvider>
           <DesktopCommands />
+          <SessionLinks />
           {props.children}
           {rootProps.children}
         </CommandProvider>
