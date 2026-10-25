@@ -11,6 +11,7 @@ import {
   ProjectAvatar,
 } from "@opencode/ui/project-avatar"
 import { TextInput } from "@opencode/ui/text-input"
+import { Tooltip } from "@opencode/ui/tooltip"
 import { createTypeahead } from "@opencode/ui/typeahead"
 import { getFilename } from "@opencode/util/path"
 import { createEffect, createMemo, createResource, For, type JSX, Match, onCleanup, Show, Switch } from "solid-js"
@@ -123,8 +124,9 @@ function NewSessionLocationDialog(props: {
 
   const addEntry: LocationEntry = { id: "add", type: "add" }
 
-  // Remote projects also match their server's name, which their tag shows. "Add project" is pinned above the list but
-  // navigates last, so the first project stays the opening row and ArrowUp from it wraps to "Add project" above.
+  // Remote projects also match their server's name, which their tag shows. "Add project" is shown first, above the
+  // heading, but navigates last, so the first project stays the opening row and the arrow keys' wrap-around still
+  // follows the rows on screen.
   const projectEntries = createMemo<LocationEntry[]>(() => [
     ...props.project
       .projects()
@@ -166,11 +168,9 @@ function NewSessionLocationDialog(props: {
     return projectEntries()
   }
 
-  const pinned = () => !props.projectsOnly && !store.drilled && !store.picking
-
   const drillable = (project: PromptProject) => !props.projectsOnly && !!project.id && project.vcs === "git"
 
-  const listEntries = () => entries().filter((entry) => entry.type !== "add")
+  const grouped = () => entries().filter((entry) => entry !== addEntry)
 
   const title = () => {
     if (store.drilled) return language.t("session.new.workspace.runIn")
@@ -419,29 +419,43 @@ function NewSessionLocationDialog(props: {
             aria-activedescendant={typeahead.activeID()}
             onInput={(event) => setStore("query", event.currentTarget.value)}
             onKeyDown={handleKeyDown}
+            trailing={
+              <Show when={!props.projectsOnly && !store.drilled && !store.picking}>
+                <Tooltip placement="top" value={language.t("session.new.project.add")}>
+                  <button
+                    type="button"
+                    class="new-session-location-add"
+                    aria-label={language.t("session.new.project.add")}
+                    onClick={() => choose(addEntry)}
+                  >
+                    <Icon name="plus" size="small" />
+                    <span>{language.t("session.new.project.add")}</span>
+                  </button>
+                </Tooltip>
+              </Show>
+            }
           />
         </div>
-        <div id={typeahead.listID} class="new-session-location-list" role="listbox">
-          <Show when={pinned()}>
-            <div class="new-session-location-pinned">{option(addEntry)}</div>
-          </Show>
-          <div class="command-palette-scroll" data-scrollable ref={(el) => (resultsRef = el)}>
-            <div class="command-palette-results">
-              <Show
-                when={listEntries().length > 0}
-                fallback={
-                  // The worktree list may still be loading; hold the row's height without flashing a label.
-                  <div class="command-palette-state" classList={{ invisible: !!store.drilled && listed.loading }}>
-                    {language.t("palette.empty")}
-                  </div>
-                }
-              >
-                <div class="command-palette-group">
-                  <div class="command-palette-group-title">{title()}</div>
-                  <For each={listEntries()}>{option}</For>
+        <div class="command-palette-scroll" data-scrollable ref={(el) => (resultsRef = el)}>
+          <div id={typeahead.listID} class="command-palette-results" role="listbox">
+            <Show
+              when={entries().length > 0}
+              fallback={
+                // The worktree list may still be loading; hold the row's height without flashing a label.
+                <div class="command-palette-state" classList={{ invisible: !!store.drilled && listed.loading }}>
+                  {language.t("palette.empty")}
                 </div>
-              </Show>
-            </div>
+              }
+            >
+              {/* One group, so the heading follows "Add project" at the row rhythm rather than the gap between groups. */}
+              <div class="command-palette-group">
+                <Show when={entries().includes(addEntry)}>{option(addEntry)}</Show>
+                <Show when={grouped().length > 0}>
+                  <div class="command-palette-group-title">{title()}</div>
+                  <For each={grouped()}>{option}</For>
+                </Show>
+              </div>
+            </Show>
           </div>
         </div>
         <Show when={!props.projectsOnly}>
