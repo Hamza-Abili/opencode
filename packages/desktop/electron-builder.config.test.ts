@@ -84,7 +84,10 @@ test("legacy Linux launcher stays hidden", async () => {
 
 test("shared packaging defaults", async () => {
   const config = load("dev")
-  expect(config.mac?.sign).toBeFunction()
+  // Packaging runs in secretless build jobs; the release workflow signs and notarizes afterwards.
+  expect(config.mac?.sign).toBeUndefined()
+  expect(config.mac?.notarize).toBeUndefined()
+  expect(config.win?.signtoolOptions).toBeUndefined()
   expect(config.dmg?.sign).not.toBe(true)
   expect(config.mac?.extendInfo?.NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac).toBe(true)
   const include = path.join(import.meta.dirname, "resources/windows/installer.nsh")
