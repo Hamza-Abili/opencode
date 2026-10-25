@@ -27,9 +27,6 @@ on:
         description: "Reviewed V2 release notes for CHANGELOG.md and the GitHub release (optional)"
         required: false
         type: string
-  # TEMPORARY: runs the build half for real and the sign and publish half as a dry run without secrets.
-  pull_request:
-    paths: [.github/workflows/release.yml, .github/release/**]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ (inputs.bump || inputs.version) && 'release' || 'build' }}
