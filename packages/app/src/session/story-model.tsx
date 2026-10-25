@@ -7,6 +7,9 @@ import {
   type SessionComposerRegionViewController,
 } from "@/session/composer/session-composer-region"
 import { SessionActivityChips, type SessionActivityItem } from "@/session/composer/activity-chips"
+import { SessionComposerLane } from "@/session/composer/composer-lane"
+import { SessionTodoPill } from "@/session/composer/todo-pill"
+import type { Todo } from "@/session/composer/todos"
 import { SettingsProvider } from "@/settings/model"
 import { SubagentBar } from "@/session/composer/subagent-bar"
 import { SessionPanelFrame, SessionRouteFrame } from "@/session/session-frame"
@@ -86,7 +89,9 @@ export type SessionPreviewProps = {
   description: string
   document: SessionDocument
   draft?: string
-  request?: { type: "permission"; value: PermissionRequest } | { type: "question" | "websearch"; value: FormInfo }
+  request?:
+    | { type: "permission"; value: PermissionRequest }
+    | { type: "question" | "websearch" | "elicitation"; value: FormInfo }
   reviewOpened?: boolean
   child?: Omit<ComponentProps<typeof SubagentBar>, "onBack">
   activity?: {
@@ -95,6 +100,7 @@ export type SessionPreviewProps = {
     onOpen?: (item: SessionActivityItem) => void
     onStop?: (item: SessionActivityItem) => void
   }
+  todos?: { items: Todo[]; open?: boolean }
   timelineDetail?: TimelineDetail
   /** Content for the side panel, shown beside the timeline while present. */
   side?: JSX.Element
@@ -216,6 +222,7 @@ function SessionSurfaceState(props: SessionPreviewProps & { onReset: () => void 
   const region = {
     state: {
       questionRequest: () => (state.request?.type === "question" ? state.request.value : undefined),
+      elicitationRequest: () => (state.request?.type === "elicitation" ? state.request.value : undefined),
       websearch: {
         request: () => (state.request?.type === "websearch" ? state.request.value : undefined),
         options: () => [
@@ -300,20 +307,25 @@ function SessionSurfaceState(props: SessionPreviewProps & { onReset: () => void 
                     }
                     above={
                       <SettingsProvider>
-                        <SessionActivityChips
-                          subagents={props.activity?.subagents ?? []}
-                          shells={props.activity?.shells ?? []}
-                          onOpen={(item) =>
-                            props.activity?.onOpen
-                              ? props.activity.onOpen(item)
-                              : setState("activity", `Opened ${item.label ?? item.key}`)
-                          }
-                          onStop={(item) =>
-                            props.activity?.onStop
-                              ? props.activity.onStop(item)
-                              : setState("activity", `Stopped ${item.label ?? item.key}`)
-                          }
-                        />
+                        <SessionComposerLane>
+                          <SessionActivityChips
+                            subagents={props.activity?.subagents ?? []}
+                            shells={props.activity?.shells ?? []}
+                            onOpen={(item) =>
+                              props.activity?.onOpen
+                                ? props.activity.onOpen(item)
+                                : setState("activity", `Opened ${item.label ?? item.key}`)
+                            }
+                            onStop={(item) =>
+                              props.activity?.onStop
+                                ? props.activity.onStop(item)
+                                : setState("activity", `Stopped ${item.label ?? item.key}`)
+                            }
+                          />
+                          <Show when={props.todos} keyed>
+                            {(todos) => <SessionTodoPill todos={todos.items} defaultOpen={todos.open} />}
+                          </Show>
+                        </SessionComposerLane>
                       </SettingsProvider>
                     }
                     composer={<Composer model={prompt.controller} borderUnderlay />}
