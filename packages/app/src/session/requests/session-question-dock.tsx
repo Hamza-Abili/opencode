@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type Component } from "solid-js"
+import { For, Show, batch, createEffect, createMemo, onCleanup, onMount, type Component } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useMutation } from "@tanstack/solid-query"
 import { Button } from "@opencode/ui/button"
@@ -7,7 +7,6 @@ import { Tooltip } from "@opencode/ui/tooltip"
 import { DockPrompt } from "@opencode/session-ui/dock-prompt"
 import { Icon } from "@opencode/ui/icon"
 import { TextInput } from "@opencode/ui/text-input"
-import { useSpring } from "@opencode/ui/motion-spring"
 import {
   frameLoop,
   observeReducedMotion,
@@ -111,6 +110,20 @@ const launch = motionTuning.number("question.launch", {
 
 const fade: DurationOptions = { duration: 0.2, bounce: 0 }
 
+const minimizing: DurationOptions = { duration: 0.3, bounce: 0 }
+
+// Where a copy of the question sits on screen, relative to its place at rest.
+type Pose = { x: number; opacity: number }
+
+const rest: Pose = { x: 0, opacity: 1 }
+
+// A copy of the question on its way somewhere: it set off from `from` toward the offset `to`, and its spring runs from 0
+// to 1 along the way.
+type Track = { from: Pose; to: number; spring: Spring }
+
+// The question being left: inert copies of its text and its answers, and how tall they are.
+type Ghost = Track & { tab: number; els: HTMLElement[]; details: number; list: number }
+
 type QuestionField = FormStringField | FormMultiselectField
 
 function questionField(field: FormInfo["fields"][number]): field is QuestionField {
@@ -200,16 +213,14 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
     focus: 0,
     minimized: false,
     listHeight: 0,
-    detailsHeight: 0,
-    ghostDetails: 0,
-    ghostList: 0,
-    switching: false,
   })
 
   let root: HTMLDivElement | undefined
+  let chevron: HTMLButtonElement | undefined
   let detailsFrame: HTMLDivElement | undefined
   let detailsRef: HTMLDivElement | undefined
   let optionsRef: HTMLDivElement | undefined
+  let optionsTrack: HTMLDivElement | undefined
   let listRef: HTMLDivElement | undefined
   let customRef: HTMLButtonElement | undefined
   let customRow: HTMLDivElement | undefined
@@ -235,43 +246,14 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
   const customLabel = () => language.t("ui.question.custom.answerPlaceholder")
 
   const last = createMemo(() => store.tab >= total() - 1)
-  const collapse = useSpring(() => (store.minimized ? 1 : 0), { visualDuration: 0.3, bounce: 0 })
-  const hidden = createMemo(() => Math.max(0, Math.min(1, collapse())))
-  const optionsOff = createMemo(() => hidden() > 0.98)
-  // The question text and the answers box follow their measured heights, so the dock grows and shrinks with each
-  // question. Under reduced motion they land at once while the content fades.
-  const [tuned, setTuned] = createSignal(0)
-  onCleanup(motionTuning.subscribe(() => setTuned((n) => n + 1)))
-
-  const heightSpring = () => {
-    void tuned()
-
-    if (prefersReducedMotion()) return { visualDuration: 0.01, bounce: 0 }
-    const options = resize()
-    const omega = (2 * Math.PI) / options.duration
-
-    return { stiffness: omega * omega, damping: 2 * (1 - options.bounce) * omega, mass: 1 }
-  }
-
-  const listHeight = useSpring(
-    () => store.listHeight,
-    heightSpring,
-    () => store.listHeight > 0,
-  )
-
-  const detailsHeight = useSpring(
-    () => store.detailsHeight,
-    heightSpring,
-    () => store.detailsHeight > 0,
-  )
-
-  // While a switch slides content past a box's side, or the box is still shorter than what it holds, the cut edges fade
-  // instead of ending hard. The side fades follow the content's offset, which the switch writes as CSS variables.
-  const edgeMask = (cut: number) =>
-    store.switching || cut > 0.5
-      ? "linear-gradient(to right, transparent, #000 var(--question-edge-left, 0px), #000 calc(100% - var(--question-edge-right, 0px)), transparent), " +
-        `linear-gradient(to top, transparent, #000 ${Math.max(0, Math.min(24, cut)).toFixed(2)}px)`
-      : undefined
+  // The question text and the answers box follow their measured heights on springs, so the dock grows and shrinks with
+  // each question, and the answers box folds away when the dock is minimized. One frame job steps these springs and the
+  // switch between questions, and writes the results straight to the elements. Under reduced motion heights land at once.
+  const content = { details: 0, list: 0 }
+  const boxes = { details: new Spring(0), list: new Spring(0), folded: new Spring(0) }
+  let ghost: Ghost | undefined
+  let into: Track | undefined
+  let stop: VoidFunction | undefined
 
   const customUpdate = (value: string, selected: boolean = on()) => {
     const prev = input().trim()
@@ -347,27 +329,28 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
     el?.focus(how)
   }
 
+  // Measuring reads layout, so it waits while the dock's own springs are moving and runs once they come to rest.
+  let measuring: number | undefined
+
+  const requestMeasure = () => {
+    if (stop || measuring !== undefined) return
+    measuring = requestAnimationFrame(() => {
+      measuring = undefined
+      measure()
+    })
+  }
+
   onMount(() => {
-    let raf: number | undefined
+    requestMeasure()
 
-    const update = () => {
-      if (raf !== undefined) cancelAnimationFrame(raf)
-      raf = requestAnimationFrame(() => {
-        raf = undefined
-        measure()
-      })
-    }
-
-    update()
-
-    makeEventListener(window, "resize", update)
+    makeEventListener(window, "resize", requestMeasure)
 
     const dock = root?.closest('[data-component="session-composer-dock"]')
     const scroller = document.querySelector('[data-slot="session-timeline-scroll"] > .scroll-view__viewport')
-    createResizeObserver([dock, scroller], update)
+    createResizeObserver([dock, scroller], requestMeasure)
 
     onCleanup(() => {
-      if (raf !== undefined) cancelAnimationFrame(raf)
+      if (measuring !== undefined) cancelAnimationFrame(measuring)
     })
 
     focus(pickFocus())
@@ -379,14 +362,22 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
 
     if (!list || !details) return
 
-    const observer = new ResizeObserver((entries) =>
+    const observer = new ResizeObserver((entries) => {
       entries.forEach((entry) => {
         const size = entry.borderBoxSize[0]?.blockSize
 
         if (size === undefined) return
-        setStore(entry.target === list ? "listHeight" : "detailsHeight", size)
-      }),
-    )
+        const key = entry.target === list ? "list" : "details"
+        const spring = boxes[key]
+
+        if (content[key] === 0 || prefersReducedMotion()) spring.snap(size)
+        else tune(spring, resize()).set(size)
+        content[key] = size
+
+        if (key === "list") setStore("listHeight", size)
+      })
+      wake()
+    })
 
     observer.observe(list)
     observer.observe(details)
@@ -684,120 +675,138 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
 
   // Switching questions: the question being left is copied into a still, inert ghost over its place, which slides out
   // toward the side it is left on and fades, while the live text and answers, now showing the new question, slide in
-  // from the other side. The ghost fades out only as the new question fades in, so the card is never empty. A switch
-  // made mid-flight turns what is showing into another ghost from where it is. Under reduced motion they only cross-fade.
-  let ghosts: { els: HTMLElement[]; spring: Spring; dir: number; x: number; opacity: number }[] = []
-  let entering: { spring: Spring; dir: number } | undefined
-  let stopSwitch: VoidFunction | undefined
+  // from the other side. The ghost fades out only as the new question fades in, so the card is never empty. Under
+  // reduced motion they only cross-fade.
+  //
+  // A key pressed mid-switch carries on from what is on screen, at the speed it is moving. Going back to the question
+  // still leaving brings that copy back from where it is, while the live one turns into the leaving ghost. Going on to
+  // another question keeps only the more visible of the two copies on screen as the one ghost, and the new question
+  // comes in.
+  const depart = (tab: number) => {
+    if (!detailsRef || !listRef || !detailsFrame || !optionsTrack) return
+    const reduced = prefersReducedMotion()
+    const step = Math.sign(tab - store.tab)
+    const dir = root?.matches(":dir(rtl)") ? -step : step
+    const reach = reduced ? 0 : travel()
+    const options = reduced ? fade : slide()
+    const live = into ? arriving(into) : rest
+    const moving = into ? speed(into) : 0
+    const back = ghost?.tab === tab ? ghost : undefined
+    const kept = !back && ghost && leaving(ghost).opacity > live.opacity ? ghost : undefined
 
-  const reach = () => (prefersReducedMotion() ? 0 : travel())
-
-  const enteringFrame = (item: { spring: Spring; dir: number }) => ({
-    x: item.dir * reach() * (1 - item.spring.value),
-    opacity: Math.max(0, Math.min(1, item.spring.value / fadeIn())),
-  })
-
-  const paintSwitch = () => {
-    const live = [detailsRef, listRef]
-    const frame = entering ? enteringFrame(entering) : { x: 0, opacity: 1 }
-    live.forEach((el) => {
-      if (!el) return
-      el.style.transform = frame.x ? `translate3d(${frame.x.toFixed(2)}px,0,0)` : ""
-      el.style.opacity = frame.opacity < 1 ? frame.opacity.toFixed(4) : ""
-    })
-    const edges = { left: Math.max(0, -frame.x), right: Math.max(0, frame.x) }
-    ghosts.forEach((ghost) => {
-      const p = ghost.spring.value
-      const x = ghost.x - ghost.dir * reach() * p
-      const opacity = ghost.opacity * Math.max(0, 1 - p / fadeOut())
-      edges.left = Math.max(edges.left, -x)
-      edges.right = Math.max(edges.right, x)
-      ghost.els.forEach((el) => {
-        el.style.transform = `translate3d(${x.toFixed(2)}px,0,0)`
-        el.style.opacity = opacity.toFixed(4)
-      })
-    })
-    ;[detailsFrame, optionsRef].forEach((el) => {
-      el?.style.setProperty("--question-edge-left", `${edges.left.toFixed(2)}px`)
-      el?.style.setProperty("--question-edge-right", `${edges.right.toFixed(2)}px`)
-    })
+    if (ghost && ghost !== kept) ghost.els.forEach((el) => el.remove())
+    ghost = kept ?? {
+      ...track(live, -dir * reach, moving, options),
+      tab: store.tab,
+      els: [copy(detailsRef, detailsFrame), copy(listRef, optionsTrack)],
+      details: content.details,
+      list: content.list,
+    }
+    into = back ? track(leaving(back), 0, speed(back), options) : track({ x: dir * reach, opacity: 0 }, 0, 0, options)
   }
 
-  const settleSwitch = () => {
-    stopSwitch?.()
-    stopSwitch = undefined
-    entering = undefined
-    ghosts.forEach((ghost) => ghost.els.forEach((el) => el.remove()))
-    ghosts = []
-    setStore({ ghostDetails: 0, ghostList: 0, switching: false })
-    paintSwitch()
+  const dropSwitch = () => {
+    ghost?.els.forEach((el) => el.remove())
+    ghost = undefined
+    into = undefined
+  }
+
+  const paint = () => {
+    const live = into ? arriving(into) : rest
+
+    const sliding = !!(into || ghost)
+
+    ;[detailsRef, listRef].forEach((el) => el && place(el, live))
+
+    if (ghost) {
+      const pose = leaving(ghost)
+      ghost.els.forEach((el) => place(el, pose))
+    }
+
+    const folded = Math.max(0, Math.min(1, boxes.folded.value))
+    const reduced = prefersReducedMotion()
+
+    if (detailsFrame && content.details > 0) {
+      const shown = boxes.details.value
+      detailsFrame.style.height = `${shown.toFixed(2)}px`
+      mask(detailsFrame, Math.max(content.details, ghost?.details ?? 0) - shown, shown, sliding)
+    }
+
+    if (optionsRef && content.list > 0) {
+      const shown = boxes.list.value
+      const open = reduced ? 1 - boxes.folded.target : 1 - folded
+      optionsRef.style.height = `${(shown * open).toFixed(2)}px`
+      mask(optionsRef, Math.max(content.list, ghost?.list ?? 0) - shown, shown, sliding)
+    }
+
+    if (optionsRef) {
+      optionsRef.style.opacity = folded > 0 ? (1 - folded).toFixed(4) : ""
+      optionsRef.style.visibility = folded > 0.98 ? "hidden" : ""
+    }
+
+    const turn = reduced ? boxes.folded.target : folded
+
+    if (chevron) chevron.style.transform = turn > 0 ? `rotate(${(turn * 180).toFixed(2)}deg)` : ""
+  }
+
+  const tick = (dt: number) => {
+    into?.spring.step(dt)
+    ghost?.spring.step(dt)
+    boxes.details.step(dt)
+    boxes.list.step(dt)
+    boxes.folded.step(dt)
+
+    if (into?.spring.resting) into = undefined
+
+    if (ghost && (ghost.spring.value >= fadeOut() || ghost.spring.resting)) {
+      ghost.els.forEach((el) => el.remove())
+      ghost = undefined
+    }
+
+    paint()
+
+    if (into || ghost || !boxes.details.resting || !boxes.list.resting || !boxes.folded.resting) return true
+    stop = undefined
+    requestMeasure()
 
     return false
   }
 
-  const stepSwitch = (dt: number) => {
-    entering?.spring.step(dt)
-    ghosts.forEach((ghost) => ghost.spring.step(dt))
-    const gone = ghosts.filter((ghost) => ghost.spring.value >= fadeOut() || ghost.spring.resting)
-    gone.forEach((ghost) => ghost.els.forEach((el) => el.remove()))
-    ghosts = ghosts.filter((ghost) => !gone.includes(ghost))
-
-    if (ghosts.length === 0 && store.ghostList > 0) setStore({ ghostDetails: 0, ghostList: 0 })
-
-    if (ghosts.length === 0 && (!entering || entering.spring.resting)) return settleSwitch()
-    paintSwitch()
-
-    return true
+  const wake = () => {
+    stop ??= frameLoop.add(tick)
   }
 
-  // Called before the question changes, while the live elements still show the question being left.
-  const depart = (step: number) => {
-    if (!detailsRef || !listRef || !detailsFrame || !optionsRef) return
-    const dir = root?.matches(":dir(rtl)") ? -step : step
-    const from = entering ? enteringFrame(entering) : { x: 0, opacity: 1 }
-    const options = prefersReducedMotion() ? fade : slide()
-
-    const start = () => {
-      const spring = Spring.fromDuration(0, options)
-
-      return spring.set(1, { velocity: spring.omega * launch() })
-    }
-
-    setStore({
-      ghostDetails: Math.max(store.ghostDetails, store.detailsHeight),
-      ghostList: Math.max(store.ghostList, store.listHeight),
-      switching: true,
-    })
-    ghosts.push({
-      els: [ghost(detailsRef, detailsFrame), ghost(listRef, optionsRef)],
-      spring: start(),
-      dir,
-      x: from.x,
-      opacity: from.opacity,
-    })
-    entering = { spring: start(), dir }
-  }
-
-  onCleanup(observeReducedMotion(() => prefersReducedMotion() && stopSwitch && settleSwitch()))
-  onCleanup(() => stopSwitch?.())
+  onCleanup(
+    observeReducedMotion(() => {
+      if (!prefersReducedMotion() || !stop) return
+      dropSwitch()
+      Object.values(boxes).forEach((spring) => spring.snap(spring.target))
+      paint()
+    }),
+  )
+  onCleanup(() => stop?.())
 
   const jump = (tab: number) => {
     if (sending() || tab === store.tab) return
     const animate = !store.minimized
 
-    if (animate) depart(Math.sign(tab - store.tab))
+    if (animate) depart(tab)
+    else dropSwitch()
     // The highlight's index moves before the question does, so it lands on the new question's answer instead of
     // gliding from the old one.
-    setStore("focus", pickFocus(tab))
-    setStore("tab", tab)
-    setStore("editing", false)
+    batch(() => {
+      setStore("focus", pickFocus(tab))
+      setStore("tab", tab)
+      setStore("editing", false)
+    })
+    optsRef.length = options().length
+    // The first frame is painted now, so the new question never shows at rest before it slides in.
+    paint()
 
     if (!animate) return
     // The answers box is still springing to the new list's height, so focusing must not scroll it.
     focus(pickFocus(tab), { preventScroll: true })
-    // The first frame is painted now, so the new question never shows at rest before it slides in.
-    paintSwitch()
-    stopSwitch ??= frameLoop.add(stepSwitch)
+    wake()
   }
 
   const cycle = (by: number) => {
@@ -829,12 +838,19 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
     if (sending()) return
     setStore("editing", false)
     setStore("minimized", true)
+    fold(1)
   }
 
   const restore = () => {
     if (sending()) return
     setStore("minimized", false)
+    fold(0)
     focus(pickFocus())
+  }
+
+  const fold = (target: number) => {
+    tune(boxes.folded, prefersReducedMotion() ? fade : minimizing).set(target)
+    wake()
   }
 
   return (
@@ -871,25 +887,17 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
                   </div>
                 </Show>
                 <IconButton
+                  ref={(el: HTMLButtonElement) => (chevron = el)}
                   icon={<Icon name="outline-chevron-down" size="normal" />}
                   variant="ghost"
                   size="large"
                   disabled={sending()}
-                  style={{ transform: `rotate(${hidden() * 180}deg)` }}
                   onClick={store.minimized ? restore : minimize}
                   aria-label={language.t(store.minimized ? "session.question.restore" : "session.question.minimize")}
                 />
               </div>
             </div>
-            <div
-              data-slot="question-details-frame"
-              ref={(el) => (detailsFrame = el)}
-              style={{
-                height: store.detailsHeight > 0 ? `${detailsHeight()}px` : undefined,
-                "mask-image": edgeMask(Math.max(store.detailsHeight, store.ghostDetails) - detailsHeight()),
-                "mask-composite": "intersect",
-              }}
-            >
+            <div data-slot="question-details-frame" ref={(el) => (detailsFrame = el)}>
               <div data-slot="question-details" ref={(el) => (detailsRef = el)}>
                 <div
                   data-slot="question-text"
@@ -968,15 +976,7 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
           role={multi() ? "group" : "radiogroup"}
           aria-label={question()?.question}
           inert={store.minimized}
-          aria-hidden={store.minimized || optionsOff() ? "true" : undefined}
-          classList={{ "pointer-events-none": hidden() > 0.1 }}
-          style={{
-            height: store.listHeight > 0 ? `${Math.max(0, listHeight() * (1 - hidden()))}px` : undefined,
-            "mask-image": edgeMask(Math.max(store.listHeight, store.ghostList) - listHeight()),
-            "mask-composite": "intersect",
-            opacity: `${Math.max(0, Math.min(1, 1 - hidden()))}`,
-            visibility: optionsOff() ? "hidden" : "visible",
-          }}
+          aria-hidden={store.minimized ? "true" : undefined}
           // Space already acted on key down; its release must not click the button again.
           onKeyUp={(event) => {
             if (event.key !== " ") return
@@ -985,94 +985,96 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
             if (where === "option" || where === "custom") event.preventDefault()
           }}
         >
-          <div data-slot="question-options-list" ref={(el) => (listRef = el)}>
-            <span data-slot="question-highlight" ref={(el) => (highlightRef = el)} aria-hidden="true" />
-            <For each={options()}>
-              {(opt, i) => (
-                <Option
-                  multi={multi()}
-                  picked={picked(opt.value)}
-                  label={opt.label}
-                  description={opt.description}
-                  shortcut={i() < 9 ? String(i() + 1) : undefined}
-                  disabled={sending()}
-                  tabbable={store.focus === i()}
-                  ref={(el) => (optsRef[i()] = el)}
-                  onFocus={() => setStore("focus", i())}
-                  onPointerMove={(event) => hover(i(), event)}
-                  onClick={() => selectOption(i())}
-                />
-              )}
-            </For>
+          <div data-slot="question-options-track" ref={(el) => (optionsTrack = el)}>
+            <div data-slot="question-options-list" ref={(el) => (listRef = el)}>
+              <span data-slot="question-highlight" ref={(el) => (highlightRef = el)} aria-hidden="true" />
+              <For each={options()}>
+                {(opt, i) => (
+                  <Option
+                    multi={multi()}
+                    picked={picked(opt.value)}
+                    label={opt.label}
+                    description={opt.description}
+                    shortcut={i() < 9 ? String(i() + 1) : undefined}
+                    disabled={sending()}
+                    tabbable={store.focus === i()}
+                    ref={(el) => (optsRef[i()] = el)}
+                    onFocus={() => setStore("focus", i())}
+                    onPointerMove={(event) => hover(i(), event)}
+                    onClick={() => selectOption(i())}
+                  />
+                )}
+              </For>
 
-            <div
-              ref={(el) => (customRow = el)}
-              data-slot="question-option"
-              data-custom="true"
-              data-picked={on()}
-              data-editing={store.editing}
-              data-disabled={sending()}
-              onPointerMove={(event) => hover(options().length, event)}
-              onClick={(event) => {
-                if (event.target !== event.currentTarget || sending()) return
-                startCustom()
-              }}
-            >
-              <button
-                type="button"
-                ref={customRef}
-                data-slot="question-custom-toggle"
-                role={multi() ? "checkbox" : "radio"}
-                aria-checked={on()}
-                aria-label={customLabel()}
-                aria-keyshortcuts={count() <= 9 ? String(count()) : undefined}
-                tabindex={store.focus === options().length ? 0 : -1}
-                disabled={sending()}
-                onFocus={() => setStore("focus", options().length)}
-                onClick={customToggle}
+              <div
+                ref={(el) => (customRow = el)}
+                data-slot="question-option"
+                data-custom="true"
+                data-picked={on()}
+                data-editing={store.editing}
+                data-disabled={sending()}
+                onPointerMove={(event) => hover(options().length, event)}
+                onClick={(event) => {
+                  if (event.target !== event.currentTarget || sending()) return
+                  startCustom()
+                }}
               >
-                <Mark multi={multi()} picked={on()} shortcut={count() <= 9 ? String(count()) : undefined} />
-              </button>
-              <TextInput
-                ref={(el) => (customInput = el)}
-                class="question-custom-field"
-                dir="auto"
-                aria-label={customLabel()}
-                placeholder={customLabel()}
-                value={input()}
-                disabled={sending()}
-                onFocus={() => {
-                  setStore("focus", options().length)
-                  setStore("editing", true)
-                }}
-                onClick={() => {
-                  setStore("customOn", store.tab, true)
-                  customUpdate(input(), true)
-                }}
-                onBlur={() => setStore("editing", false)}
-                onKeyDown={(e) => {
-                  if (e.isComposing || e.keyCode === 229) return
+                <button
+                  type="button"
+                  ref={customRef}
+                  data-slot="question-custom-toggle"
+                  role={multi() ? "checkbox" : "radio"}
+                  aria-checked={on()}
+                  aria-label={customLabel()}
+                  aria-keyshortcuts={count() <= 9 ? String(count()) : undefined}
+                  tabindex={store.focus === options().length ? 0 : -1}
+                  disabled={sending()}
+                  onFocus={() => setStore("focus", options().length)}
+                  onClick={customToggle}
+                >
+                  <Mark multi={multi()} picked={on()} shortcut={count() <= 9 ? String(count()) : undefined} />
+                </button>
+                <TextInput
+                  ref={(el) => (customInput = el)}
+                  class="question-custom-field"
+                  dir="auto"
+                  aria-label={customLabel()}
+                  placeholder={customLabel()}
+                  value={input()}
+                  disabled={sending()}
+                  onFocus={() => {
+                    setStore("focus", options().length)
+                    setStore("editing", true)
+                  }}
+                  onClick={() => {
+                    setStore("customOn", store.tab, true)
+                    customUpdate(input(), true)
+                  }}
+                  onBlur={() => setStore("editing", false)}
+                  onKeyDown={(e) => {
+                    if (e.isComposing || e.keyCode === 229) return
 
-                  if (e.key === "Escape") {
+                    if (e.key === "Escape") {
+                      e.preventDefault()
+                      setStore("editing", false)
+                      focus(options().length)
+
+                      return
+                    }
+
+                    if ((e.metaKey || e.ctrlKey) && !e.altKey) return
+
+                    if (e.key !== "Enter") return
                     e.preventDefault()
-                    setStore("editing", false)
-                    focus(options().length)
 
-                    return
-                  }
-
-                  if ((e.metaKey || e.ctrlKey) && !e.altKey) return
-
-                  if (e.key !== "Enter") return
-                  e.preventDefault()
-
-                  if (!e.repeat) next()
-                }}
-                onInput={(e) => {
-                  setStore("customOn", store.tab, true)
-                  customUpdate(e.currentTarget.value, true)
-                }}
-              />
+                    if (!e.repeat) next()
+                  }}
+                  onInput={(e) => {
+                    setStore("customOn", store.tab, true)
+                    customUpdate(e.currentTarget.value, true)
+                  }}
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -1081,23 +1083,85 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
   )
 }
 
+// Comes into place from where it set off, fully shown by the fade-in point.
+function arriving(track: Track): Pose {
+  const p = track.spring.value
+
+  return {
+    x: track.from.x + (track.to - track.from.x) * p,
+    opacity: track.from.opacity + (1 - track.from.opacity) * Math.max(0, Math.min(1, p / fadeIn())),
+  }
+}
+
+// Leaves from where it set off, fully gone by the fade-out point.
+function leaving(track: Track): Pose {
+  const p = track.spring.value
+
+  return {
+    x: track.from.x + (track.to - track.from.x) * p,
+    opacity: track.from.opacity * Math.max(0, Math.min(1, 1 - p / fadeOut())),
+  }
+}
+
+function speed(track: Track) {
+  return (track.to - track.from.x) * track.spring.velocity
+}
+
+// Sets off from `from` at the speed it already had on screen, plus the key's launch. The start is capped at the
+// spring's natural speed so it never overshoots its place.
+function track(from: Pose, to: number, moving: number, options: DurationOptions): Track {
+  const spring = Spring.fromDuration(0, options)
+  const distance = to - from.x
+  const carried = Math.abs(distance) < 0.5 ? 0 : moving / distance
+
+  return { from, to, spring: spring.set(1, { velocity: Math.min(spring.omega, carried + spring.omega * launch()) }) }
+}
+
+function tune(spring: Spring, options: DurationOptions) {
+  spring.omega = (2 * Math.PI) / options.duration
+  spring.zeta = 1 - options.bounce
+
+  return spring
+}
+
+function place(el: HTMLElement, pose: Pose) {
+  el.style.transform = pose.x ? `translate3d(${pose.x.toFixed(2)}px,0,0)` : ""
+  el.style.opacity = pose.opacity < 1 ? pose.opacity.toFixed(4) : ""
+}
+
+// While a switch is under way, content sliding into a box's side gutters fades out there. While a box is shorter than
+// what it holds, its bottom fades instead of ending hard, over no more than a third of the box.
+function mask(el: HTMLElement, cut: number, shown: number, sliding: boolean) {
+  const bottom = Math.min(24, cut, shown / 3)
+
+  const layers = [
+    sliding
+      ? "linear-gradient(to right, transparent, #000 var(--question-gutter), #000 calc(100% - var(--question-gutter)), transparent)"
+      : "",
+    bottom > 0.5 ? `linear-gradient(to top, transparent, #000 ${bottom.toFixed(2)}px)` : "",
+  ].filter(Boolean)
+
+  if (layers.length === 0) return el.style.removeProperty("mask-image")
+  el.style.setProperty("mask-image", layers.join(", "))
+}
+
 // A still copy of `el` laid over it in `host`, after the live content so it never comes first in the DOM, inert and
 // hidden from assistive tech. Ids are dropped so they stay unique, and typed text is carried over.
-function ghost(el: HTMLElement, host: HTMLElement) {
+function copy(el: HTMLElement, host: HTMLElement) {
   // SAFETY: a deep clone of an element is an element of the same kind.
-  const copy = el.cloneNode(true) as HTMLElement
-  copy.removeAttribute("id")
-  copy.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"))
+  const clone = el.cloneNode(true) as HTMLElement
+  clone.removeAttribute("id")
+  clone.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"))
   const inputs = el.querySelectorAll("input")
-  copy.querySelectorAll("input").forEach((input, index) => (input.value = inputs[index]?.value ?? ""))
-  copy.dataset.ghost = "true"
-  copy.inert = true
-  copy.setAttribute("aria-hidden", "true")
-  copy.style.position = "absolute"
-  copy.style.top = "0"
-  copy.style.insetInline = "0"
-  copy.style.pointerEvents = "none"
-  host.append(copy)
+  clone.querySelectorAll("input").forEach((input, index) => (input.value = inputs[index]?.value ?? ""))
+  clone.dataset.ghost = "true"
+  clone.inert = true
+  clone.setAttribute("aria-hidden", "true")
+  clone.style.position = "absolute"
+  clone.style.top = "0"
+  clone.style.insetInline = "var(--question-gutter)"
+  clone.style.pointerEvents = "none"
+  host.append(clone)
 
-  return copy
+  return clone
 }

@@ -84,10 +84,16 @@
     }
   }
 
-  /* Holds the question text at its sprung height, and the outgoing copy of it while questions switch. */
+  /* Holds the question text at its sprung height, and the outgoing copy of it while questions switch. It reaches into
+     the header's side padding, so text sliding past a side fades out in that gutter instead of over the text at rest. */
   [data-slot="question-details-frame"] {
+    --question-gutter: 10px;
     position: relative;
     min-inline-size: 0;
+    margin-inline: calc(-1 * var(--question-gutter));
+    padding-inline: var(--question-gutter);
+    overflow: clip;
+    mask-composite: intersect;
   }
 
   [data-slot="question-details"] {
@@ -197,19 +203,29 @@
     min-inline-size: 0;
   }
 
+  /* Reaches into the body's side padding like the question text's frame, for the same gutter. */
   [data-slot="question-options"] {
-    position: relative;
+    --question-gutter: 8px;
     flex: 1 1 auto;
     min-block-size: 0;
     min-inline-size: 0;
-    margin: 0;
+    margin: 0 calc(-1 * var(--question-gutter));
     padding: 0;
     overflow-y: auto;
     scrollbar-width: none;
+    mask-composite: intersect;
 
     &::-webkit-scrollbar {
       display: none;
     }
+  }
+
+  /* Holds the answers and the outgoing copy of them while questions switch. It clips them at its sides, so answers
+     sliding past never make the box scroll sideways. */
+  [data-slot="question-options-track"] {
+    position: relative;
+    padding-inline: var(--question-gutter);
+    overflow-x: clip;
   }
 
   [data-slot="question-options-list"] {
