@@ -323,6 +323,11 @@ const layer = Layer.effect(
                 },
               })
             if (outcome.needsContinuation) return true
+            // Stopping short of the catalog limit means the context window ran out, so continuing alone cannot help.
+            if (outcome.early && recoverOverflow) {
+              recoverOverflow = false
+              yield* compaction.compact({ reason: "overflow", context: loaded })
+            }
             yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: CONTINUE_AFTER_OUTPUT_LIMIT })
             assistantMessageID = SessionMessage.ID.create()
           }),

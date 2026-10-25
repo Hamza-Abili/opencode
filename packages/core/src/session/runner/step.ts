@@ -38,7 +38,7 @@ export type Outcome = Data.TaggedEnum<{
   }
   RecoverFull: {}
   Compacted: {}
-  OutputLimit: { readonly needsContinuation: boolean }
+  OutputLimit: { readonly needsContinuation: boolean; readonly early: boolean }
 }>
 export const Outcome = Data.taggedEnum<Outcome>()
 
@@ -277,7 +277,11 @@ export const make = Effect.gen(function* () {
         if (tools.interrupted && Exit.isFailure(joined)) return yield* Effect.failCause(joined.cause)
         if (record.failure) return yield* new StepFailedError({ error: record.failure })
         const needsContinuation = input.prepared.request.toolChoice?.type !== "none" && record.needsContinuation
-        if (record.finish?.finish === "length") return Outcome.OutputLimit({ needsContinuation })
+        if (record.finish?.finish === "length") {
+          const output = record.finish.usage?.outputTokens
+          const early = output !== undefined && input.model.limit.output > 0 && output < input.model.limit.output
+          return Outcome.OutputLimit({ needsContinuation, early })
+        }
         return Outcome.Completed({ needsContinuation })
       }),
     )

@@ -5723,6 +5723,42 @@ describe("SessionRunnerLLM", () => {
     })
   }
 
+  scenario("compacts before continuing only when a length stop ends below the output limit", function* (s) {
+    yield* setupOverflowRecovery(s)
+    const truncated = (outputTokens: number) =>
+      TestLLM.complete(
+        { reason: { normalized: "length" }, usage: { outputTokens } },
+        LLMEvent.textStart({ id: "partial" }),
+        LLMEvent.textDelta({ id: "partial", text: "Partial" }),
+        LLMEvent.textEnd({ id: "partial" }),
+      )
+    yield* s.llm.push(
+      truncated(200),
+      TestLLM.text("## Objective\n- Early stop", "text-summary"),
+      TestLLM.text("Finished", "text-final"),
+    )
+    yield* s.runPrompt("Continue")
+
+    expect(s.requests).toHaveLength(3)
+    expect(userTexts(s.requests[1]).at(-1)).toContain("## Objective")
+    expect(userTexts(s.requests[2])[0]).toContain("<summary>\n## Objective\n- Early stop\n</summary>")
+    expect(userTexts(s.requests[2]).at(-1)).toContain("output token limit")
+    expect(yield* s.context).toMatchObject([
+      { type: "compaction" },
+      { type: "synthetic" },
+      { type: "assistant", finish: "stop" },
+    ])
+    expect((yield* s.messages).some((message) => message.type === "assistant" && message.finish === "length")).toBe(
+      true,
+    )
+
+    s.requests.length = 0
+    yield* s.llm.push(truncated(1_000), TestLLM.text("Finished", "text-full"))
+    yield* s.runPrompt("Continue again")
+    expect(s.requests).toHaveLength(2)
+    expect(userTexts(s.requests[1]).at(-1)).toContain("output token limit")
+  })
+
   for (const tools of ["hosted", "unfinished"] as const) {
     scenario(`caps output token limit continuations and resets for new input (${tools})`, function* (s) {
       const toolEvents =
