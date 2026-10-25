@@ -1223,11 +1223,11 @@ jobs:
 
           : > "$RUNNER_TEMP/publish.tsv"
           for f in "$RUNNER_TEMP"/macos/*.tgz "$RUNNER_TEMP"/windows/*.tgz "$RUNNER_TEMP"/npm/*.tgz; do
-            meta=$(tar -xzOf "$f" package/package.json | jq -r '[.name, .version, (has("publishConfig")), ((.scripts // {}) | (has("preinstall") or has("install") or has("postinstall")))] | @tsv')
+            meta=$(tar -xzOf "$f" package/package.json | jq -r '[.name, .version, ((.publishConfig // {}) | keys - ["access"] | length > 0), ((.scripts // {}) | (has("preinstall") or has("install") or has("postinstall")))] | @tsv')
             IFS=$'\t' read -r name version config install <<< "$meta"
             if ! printf '%s\n' $expected | grep -qxF -- "$name"; then echo "Unexpected package $name in $f"; exit 1; fi
             if [ "$version" != "$VERSION" ]; then echo "$name has version $version, expected $VERSION"; exit 1; fi
-            if [ "$config" != false ]; then echo "$name sets publishConfig"; exit 1; fi
+            if [ "$config" != false ]; then echo "$name sets publishConfig beyond access"; exit 1; fi
             if [ "$install" != false ] && [ "$name" != @opencode/cli ] && [ "$name" != @opencode/cli-node ]; then echo "$name has an install script"; exit 1; fi
             if cut -f1 "$RUNNER_TEMP/publish.tsv" | grep -qxF -- "$name"; then echo "$name is packed twice"; exit 1; fi
             printf '%s\t%s\n' "$name" "$f" >> "$RUNNER_TEMP/publish.tsv"
