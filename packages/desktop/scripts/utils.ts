@@ -131,10 +131,6 @@ async function prepareCli(dest: string) {
 
   if (process.platform !== "win32") await chmod(dest, 0o755)
 
-  if (process.platform === "win32" && process.env.GITHUB_ACTIONS === "true") {
-    await $`pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ../../script/sign-windows.ps1 ${dest}`
-  }
-
   if (process.platform === "darwin") await $`codesign --force --sign - ${dest}`
 }
 

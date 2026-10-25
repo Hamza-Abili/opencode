@@ -2,8 +2,5 @@
 packages/app/      @Hona @Brendonovich
 packages/desktop/  @Hona @Brendonovich
 
-# CI, release, and publish scripts
+# CI and the release workflow. Release jobs that hold secrets run only code from .github/workflows.
 /.github/ @anomalyco/ci-owners
-/script/ @anomalyco/ci-owners
-/packages/*/script/ @anomalyco/ci-owners
-/github/ @anomalyco/ci-owners

@@ -1,21 +1,12 @@
-import { execFile } from "node:child_process"
 import { readdir, stat } from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { promisify } from "node:util"
 
-import type { CustomMacSignOptions } from "app-builder-lib"
 import { Arch, type Configuration } from "electron-builder"
 import { NativeArch } from "../../script/native-arch"
 import { CLI_BINARIES, getCurrentCli, nodePtyPackage } from "./scripts/utils"
 
-const execFileAsync = promisify(execFile)
-
 const packageDir = path.dirname(fileURLToPath(import.meta.url))
-
-const rootDir = path.resolve(packageDir, "../..")
-
-const signScript = path.join(rootDir, "script", "sign-windows.ps1")
 
 // The Electron 42 packaging update briefly installed Linux launchers/icons under
 // "opencode-desktop". Keep that hidden desktop entry around so existing GNOME/KDE
@@ -33,32 +24,6 @@ const rpmNoBuildIdLinksFpm = "--rpm-rpmbuild-define=_build_id_links none"
 
 const metainfoFpm = (appId: string) =>
   `${path.join(packageDir, "resources", `${appId}.metainfo.xml`)}=/usr/share/metainfo/${appId}.metainfo.xml`
-
-async function signWindows(configuration: { path: string }) {
-  if (process.platform !== "win32") return
-
-  if (process.env.GITHUB_ACTIONS !== "true") return
-
-  await execFileAsync(
-    "pwsh",
-    ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", signScript, configuration.path],
-    { cwd: rootDir, windowsHide: true },
-  )
-}
-
-function macSignOptions(options: CustomMacSignOptions): CustomMacSignOptions {
-  return {
-    ...options,
-    optionsForFile: (file) => {
-      const defaults = options.optionsForFile?.(file)
-
-      if (file !== path.join(options.app, "Contents/Resources/opencode-cli")) return defaults ?? {}
-
-      // The Bun CLI loads bun-pty's native library; Electron and its helpers do not need this exception.
-      return { ...defaults, entitlements: path.join(packageDir, "resources/entitlements.cli.plist") }
-    },
-  }
-}
 
 function resolveChannel() {
   const raw = process.env.OPENCODE_CHANNEL
@@ -185,15 +150,6 @@ const getBase = (appId: string): Configuration => {
       extendInfo: {
         NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
       },
-      hardenedRuntime: true,
-      gatekeeperAssess: false,
-      entitlements: "resources/entitlements.plist",
-      entitlementsInherit: "resources/entitlements.plist",
-      sign: async (options) => {
-        const { sign } = await import("app-builder-lib/out/codeSign/macCodeSign")
-        await sign(macSignOptions(options))
-      },
-      notarize: true,
       target: ["dmg", "zip"],
     },
     protocols: {
@@ -202,9 +158,6 @@ const getBase = (appId: string): Configuration => {
     },
     win: {
       icon: `resources/icons/icon.ico`,
-      signtoolOptions: {
-        sign: signWindows,
-      },
       target: ["nsis"],
       verifyUpdateCodeSignature: false,
     },

@@ -1,45 +1,46 @@
 #!/usr/bin/env bun
 
 import { $ } from "bun"
-import { rm } from "node:fs/promises"
+import { mkdir, rm } from "node:fs/promises"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 
-export async function pack() {
-  const original = await Bun.file("package.json").text()
+process.chdir(fileURLToPath(new URL("..", import.meta.url)))
 
-  const pkg = JSON.parse(original) as {
-    name: string
-    version: string
-    exports: Record<string, string | { types: string; import: string }>
-  }
+const destination = path.resolve(process.env.OPENCODE_PACK_DIR ?? "../../dist/npm")
+await mkdir(destination, { recursive: true })
 
-  const tarball = path.resolve(`${pkg.name.replace("@", "").replace("/", "-")}-${pkg.version}.tgz`)
+const original = await Bun.file("package.json").text()
 
-  await $`bun run build`
-  pkg.exports = Object.fromEntries(
-    Object.entries(pkg.exports).map(([key, value]) => {
-      if (typeof value !== "string" || (!value.endsWith(".ts") && !value.endsWith(".tsx"))) return [key, value]
-
-      return [
-        key,
-        {
-          types: value.replace("./src/", "./dist/").replace(/\.tsx?$/, ".d.ts"),
-          import: value,
-        },
-      ]
-    }),
-  )
-
-  await rm(tarball, { force: true })
-  await Bun.write("package.json", JSON.stringify(pkg, null, 2) + "\n")
-
-  try {
-    await $`bun pm pack`
-
-    return tarball
-  } finally {
-    await Bun.write("package.json", original)
-  }
+const pkg = JSON.parse(original) as {
+  name: string
+  version: string
+  exports: Record<string, string | { types: string; import: string }>
 }
 
-if (import.meta.main) console.log(await pack())
+const tarball = path.join(destination, `${pkg.name.replace("@", "").replace("/", "-")}-${pkg.version}.tgz`)
+
+await $`bun run typecheck:tsc`
+await $`bun run build`
+pkg.exports = Object.fromEntries(
+  Object.entries(pkg.exports).map(([key, value]) => {
+    if (typeof value !== "string" || (!value.endsWith(".ts") && !value.endsWith(".tsx"))) return [key, value]
+
+    return [
+      key,
+      {
+        types: value.replace("./src/", "./dist/").replace(/\.tsx?$/, ".d.ts"),
+        import: value,
+      },
+    ]
+  }),
+)
+
+await rm(tarball, { force: true })
+await Bun.write("package.json", JSON.stringify(pkg, null, 2) + "\n")
+
+try {
+  await $`bun pm pack --destination ${destination}`
+} finally {
+  await Bun.write("package.json", original)
+}
