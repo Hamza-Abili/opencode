@@ -169,7 +169,7 @@ function publishClaims(ref: string, event_name = "push", environment = "release"
     repository: "anomalyco/opencode",
     repository_id: "975734319",
     repository_owner_id: "66570915",
-    workflow_ref: `anomalyco/opencode/.github/workflows/publish.yml@${ref}`,
+    workflow_ref: `anomalyco/opencode/.github/workflows/release.yml@${ref}`,
     ref,
     event_name,
     environment,

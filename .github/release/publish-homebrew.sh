@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# publish-homebrew.sh <sign-cli-macos dir> <build-archives dir>: updates opencode-v2 in anomalyco/homebrew-tap
+# publish-homebrew.sh <sign-macos dir> <build-archives dir>: updates opencode-v2 in anomalyco/homebrew-tap
 # (HOMEBREW_TOKEN) and registers the homebrew update artifact.
 . "$(dirname "$0")/lib.sh"
 

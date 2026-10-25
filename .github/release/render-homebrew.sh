@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# render-homebrew.sh <sign-cli-macos dir> <build-archives dir> <tap dir>: writes Formula opencode-v2.rb with the
+# render-homebrew.sh <sign-macos dir> <build-archives dir> <tap dir>: writes Formula opencode-v2.rb with the
 # hashes of the signed macOS and the Linux archives.
 . "$(dirname "$0")/lib.sh"
 

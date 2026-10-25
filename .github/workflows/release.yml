@@ -1,4 +1,4 @@
-name: publish
+name: release
 run-name: "${{ format('release {0}{1}', inputs.bump, inputs.version) }}"
 
 # Builds are separated from signing and publishing.
@@ -29,7 +29,7 @@ on:
         type: string
   # TEMPORARY: runs the build half for real and the sign and publish half as a dry run without secrets.
   pull_request:
-    paths: [.github/workflows/publish.yml, .github/release/**]
+    paths: [.github/workflows/release.yml, .github/release/**]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ (inputs.bump || inputs.version) && 'release' || 'build' }}
@@ -74,7 +74,7 @@ jobs:
 
   # A versioned release builds from a commit with its versions and changelog on the dispatched dev commit,
   # tagged v<version>. Runs git only.
-  commit:
+  tag:
     needs: plan
     runs-on: ubuntu-24.04
     permissions:
@@ -85,22 +85,22 @@ jobs:
       OPENCODE_NPM_TAG: ${{ needs.plan.outputs.npm_tag }}
       OPENCODE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
     outputs:
-      sha: ${{ steps.commit.outputs.sha || github.sha }}
+      sha: ${{ steps.tag.outputs.sha || github.sha }}
     steps:
       - name: Check out
         if: needs.plan.outputs.channel == 'latest'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - id: commit
-        name: Commit
+      - id: tag
+        name: Tag
         if: needs.plan.outputs.channel == 'latest'
-        run: bash .github/release/commit-release.sh
+        run: bash .github/release/tag-release.sh
         env:
           OPENCODE_RELEASE_NOTES: ${{ inputs.release_notes }}
 
   # ---- Build: repository code; no environment, secrets or id-token --------------------------------------------
 
   build-cli:
-    needs: [plan, commit]
+    needs: [plan, tag]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     env: *env
@@ -109,7 +109,7 @@ jobs:
         name: Check out
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: ${{ needs.commit.outputs.sha }}
+          ref: ${{ needs.tag.outputs.sha }}
           persist-credentials: false
       - name: Set up Bun
         uses: ./.github/actions/setup-bun
@@ -129,7 +129,7 @@ jobs:
           path: packages/cli/dist
 
   build-node:
-    needs: [plan, commit]
+    needs: [plan, tag]
     if: needs.plan.outputs.node == 'true'
     strategy:
       fail-fast: false
@@ -168,7 +168,7 @@ jobs:
   # `bun run pack` packs every npm package into dist/npm and the Linux and Node CLI archives into dist/archives.
   # The macOS and Windows CLI packages and archives are re-packed after signing.
   build-npm:
-    needs: [plan, commit, build-cli, build-node]
+    needs: [plan, tag, build-cli, build-node]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.cli == 'true' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
@@ -204,7 +204,7 @@ jobs:
           path: dist/archives
 
   build-docker:
-    needs: [plan, commit, build-cli]
+    needs: [plan, tag, build-cli]
     if: needs.plan.outputs.release == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     env: *env
@@ -215,6 +215,8 @@ jobs:
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
       - name: Pack
         working-directory: packages/cli
         run: bun run pack:docker
@@ -226,7 +228,7 @@ jobs:
 
   # macOS and Windows pack an unsigned app; Linux packs the final AppImage, deb and rpm.
   build-desktop:
-    needs: [plan, commit, build-cli]
+    needs: [plan, tag, build-cli]
     if: needs.plan.outputs.desktop == 'true'
     strategy:
       fail-fast: false
@@ -274,8 +276,8 @@ jobs:
 
   # Packs the NSIS installer around the signed app. This runs repository config, so it is a build job; the
   # installer is signed next.
-  build-installer:
-    needs: [plan, commit, sign-windows]
+  build-desktop-windows-installer:
+    needs: [plan, tag, sign-windows]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.desktop == 'true' }}
     strategy:
       fail-fast: false
@@ -306,33 +308,11 @@ jobs:
       - name: Upload
         uses: ./.github/release/upload
         with:
-          name: build-installer-${{ matrix.target }}
+          name: build-desktop-windows-installer-${{ matrix.target }}
           path: dist/desktop
 
   # ---- Sign: release environment; only .github/release/ is checked out ----------------------------------------
   # Pull requests run sign and publish jobs without an environment, so steps that need a secret skip or dry-run.
-
-  # Build provenance for the npm tarballs and Linux archives. No secrets; id-token only for Sigstore.
-  sign-provenance:
-    needs: [plan, build-npm]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.cli == 'true' && needs.plan.outputs.dry_run != 'true' }}
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
-    steps:
-      - *checkout-release
-      - name: Download
-        uses: ./.github/release/download
-        with:
-          pattern: "{build-npm,build-archives}"
-      - name: Sign
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: |
-            ${{ runner.temp }}/in/build-npm/*.tgz
-            ${{ runner.temp }}/in/build-archives/opencode*
 
   # Signs the macOS CLI; signs the desktop apps inside-out, notarizes them in one submission, staples them, and
   # only then builds the zip, dmg and .app.tar.gz from the stapled apps.
@@ -448,8 +428,8 @@ jobs:
           name: sign-desktop-windows-x64
           path: ${{ runner.temp }}/work/desktop-windows-x64
 
-  sign-installer:
-    needs: [plan, build-installer]
+  sign-desktop-windows-installer:
+    needs: [plan, build-desktop-windows-installer]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.desktop == 'true' }}
     runs-on: windows-2025
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
@@ -464,9 +444,9 @@ jobs:
       - name: Download
         uses: ./.github/release/download
         with:
-          pattern: build-installer-*
+          pattern: build-desktop-windows-installer-*
       - name: Unpack
-        run: mkdir -p "$RUNNER_TEMP/work" && cp "$RUNNER_TEMP"/in/build-installer-*/*.exe "$RUNNER_TEMP/work/"
+        run: mkdir -p "$RUNNER_TEMP/work" && cp "$RUNNER_TEMP"/in/build-desktop-windows-installer-*/*.exe "$RUNNER_TEMP/work/"
       - *azure-login
       - *azure-sign
       - name: Repack
@@ -475,14 +455,36 @@ jobs:
         name: Upload
         uses: ./.github/release/upload
         with:
-          name: sign-installer
+          name: sign-desktop-windows-installer
           path: ${{ runner.temp }}/work
 
   # ---- Publish: release environment; only .github/release/ is checked out -------------------------------------
   # Destinations, names and channels come from plan and the scripts, never from artifacts.
 
+  # Build provenance for the npm tarballs and Linux archives. No secrets; id-token only for Sigstore.
+  publish-attestations:
+    needs: [plan, build-npm]
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.cli == 'true' && needs.plan.outputs.dry_run != 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - *checkout-release
+      - name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: "{build-npm,build-archives}"
+      - name: Sign
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/in/build-npm/*.tgz
+            ${{ runner.temp }}/in/build-archives/opencode*
+
   publish-npm:
-    needs: [plan, sign-macos, sign-windows, sign-provenance]
+    needs: [plan, sign-macos, sign-windows, publish-attestations]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.cli == 'true' }}
     runs-on: ubuntu-24.04
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
@@ -527,7 +529,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
   publish-desktop:
-    needs: [plan, sign-macos, sign-installer]
+    needs: [plan, sign-macos, sign-desktop-windows-installer]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.desktop == 'true' }}
     runs-on: ubuntu-24.04
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
@@ -540,11 +542,11 @@ jobs:
       - name: Download
         uses: ./.github/release/download
         with:
-          pattern: "{sign-macos,sign-installer,build-desktop-linux-*}"
-          digests: sign-macos=${{ needs.sign-macos.outputs.digest }} sign-installer=${{ needs.sign-installer.outputs.digest }}
+          pattern: "{sign-macos,sign-desktop-windows-installer,build-desktop-linux-*}"
+          digests: sign-macos=${{ needs.sign-macos.outputs.digest }} sign-desktop-windows-installer=${{ needs.sign-desktop-windows-installer.outputs.digest }}
       - name: Publish
         run: |
-          bash .github/release/publish-desktop.sh "$RUNNER_TEMP/in/sign-macos" "$RUNNER_TEMP/in/sign-installer" \
+          bash .github/release/publish-desktop.sh "$RUNNER_TEMP/in/sign-macos" "$RUNNER_TEMP/in/sign-desktop-windows-installer" \
             "$RUNNER_TEMP/in/build-desktop-linux-x64" "$RUNNER_TEMP/in/build-desktop-linux-arm64"
         env: *cloudflare
 
@@ -614,7 +616,7 @@ jobs:
 
   # WinGet manifests as data. Submission to microsoft/winget-pkgs stays paused until the packages are accepted.
   publish-winget:
-    needs: [plan, sign-windows, sign-installer]
+    needs: [plan, sign-windows, sign-desktop-windows-installer]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
     env: *env
@@ -623,10 +625,10 @@ jobs:
       - name: Download
         uses: ./.github/release/download
         with:
-          pattern: "{sign-windows,sign-installer}"
-          digests: sign-windows=${{ needs.sign-windows.outputs.digest }} sign-installer=${{ needs.sign-installer.outputs.digest }}
+          pattern: "{sign-windows,sign-desktop-windows-installer}"
+          digests: sign-windows=${{ needs.sign-windows.outputs.digest }} sign-desktop-windows-installer=${{ needs.sign-desktop-windows-installer.outputs.digest }}
       - name: Render
-        run: bash .github/release/render-winget.sh "$RUNNER_TEMP/in/sign-windows" "$RUNNER_TEMP/in/sign-installer" "$RUNNER_TEMP/out"
+        run: bash .github/release/render-winget.sh "$RUNNER_TEMP/in/sign-windows" "$RUNNER_TEMP/in/sign-desktop-windows-installer" "$RUNNER_TEMP/out"
       - name: Upload
         uses: ./.github/release/upload
         with:
@@ -634,7 +636,7 @@ jobs:
           path: ${{ runner.temp }}/out
 
   publish-github-release:
-    needs: [plan, sign-macos, sign-windows, sign-installer, publish-cli, publish-desktop]
+    needs: [plan, sign-macos, sign-windows, sign-desktop-windows-installer, publish-cli, publish-desktop]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
@@ -646,10 +648,10 @@ jobs:
       - name: Download
         uses: ./.github/release/download
         with:
-          pattern: "{build-archives,build-desktop-linux-*,sign-macos,sign-windows,sign-installer}"
+          pattern: "{build-archives,build-desktop-linux-*,sign-macos,sign-windows,sign-desktop-windows-installer}"
           digests: >-
             sign-macos=${{ needs.sign-macos.outputs.digest }} sign-windows=${{ needs.sign-windows.outputs.digest }}
-            sign-installer=${{ needs.sign-installer.outputs.digest }}
+            sign-desktop-windows-installer=${{ needs.sign-desktop-windows-installer.outputs.digest }}
       - name: Publish
         run: bash .github/release/publish-github-release.sh "$RUNNER_TEMP"/in/*
         env:
@@ -658,8 +660,8 @@ jobs:
           OPENCODE_RELEASE_NOTES: ${{ inputs.release_notes }}
 
   # Brings the release commit back to dev. Pushing to dev is blocked by rulesets, so it opens a PR.
-  publish-pr:
-    needs: [plan, commit, publish-npm, publish-cli, publish-desktop, publish-github-release]
+  publish-version-pr:
+    needs: [plan, tag, publish-npm, publish-cli, publish-desktop, publish-github-release]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.channel == 'latest' }}
     runs-on: ubuntu-24.04
     permissions:
@@ -669,8 +671,8 @@ jobs:
     steps:
       - *checkout-release
       - name: Publish
-        run: bash .github/release/publish-pr.sh "$SHA"
+        run: bash .github/release/publish-version-pr.sh "$SHA"
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          SHA: ${{ needs.commit.outputs.sha }}
+          SHA: ${{ needs.tag.outputs.sha }}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# commit-release.sh: in a checkout of the dispatched dev commit, commits the release versions and changelog
+# tag-release.sh: in a checkout of the dispatched dev commit, commits the release versions and changelog
 # (OPENCODE_RELEASE_NOTES) and pushes only the v<version> tag at it. Writes sha=<commit> to $GITHUB_OUTPUT.
 # Runs git only, with hooks disabled; no repository code.
 . "$(dirname "$0")/lib.sh"

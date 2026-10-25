@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# publish-pr.sh <sha>: opens the pull request that brings the release commit (versions and changelog) back to dev.
+# publish-version-pr.sh <sha>: opens the pull request that brings the release commit (versions and changelog) back to dev.
 # Pushing to dev is blocked by rulesets, so this never merges.
 . "$(dirname "$0")/lib.sh"
 
