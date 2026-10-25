@@ -1,7 +1,7 @@
 import { defineConfig } from "electron-vite"
 import type { Plugin } from "vite"
-import { pickerPlugin } from "./scripts/picker"
-import { nodePtyPackage } from "./scripts/utils"
+import { pickerPlugin } from "./script/picker"
+import { nodePtyPackage } from "./script/utils"
 
 function resolveChannel() {
   const raw = process.env.OPENCODE_CHANNEL

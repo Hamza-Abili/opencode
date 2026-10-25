@@ -2,20 +2,18 @@
 import { $ } from "bun"
 import pkg from "../package.json"
 import { Script } from "@opencode/script"
-import { fileURLToPath } from "url"
+import { archiveDir, npmDir } from "@opencode/script/pack"
 import { existsSync } from "fs"
 import { chmod, mkdir, rm, utimes } from "node:fs/promises"
 import path from "node:path"
 
-// Packs the built CLI into npm tarballs and standalone archives. The release workflow signs the
-// macOS and Windows packages afterwards, so their archives are produced there, not here.
-const dir = fileURLToPath(new URL("..", import.meta.url))
-const root = path.resolve(process.env.OPENCODE_CLI_DIST ?? path.join(dir, "dist"))
-const npm = path.resolve(process.env.OPENCODE_PACK_DIR ?? path.join(dir, "../../dist/npm"))
-const archives = path.resolve(process.env.OPENCODE_ARCHIVE_DIR ?? path.join(dir, "../../dist/archives"))
+// Packs the built CLI (dist/) into npm tarballs in dist/npm and standalone archives in dist/archives at
+// the repository root. The release workflow signs the macOS and Windows packages and archives afterwards.
+const dir = path.resolve(import.meta.dir, "..")
+const root = path.join(dir, "dist")
 process.chdir(dir)
-await mkdir(npm, { recursive: true })
-await mkdir(archives, { recursive: true })
+await mkdir(npmDir, { recursive: true })
+await mkdir(archiveDir, { recursive: true })
 
 await packDistribution({
   root,
@@ -111,7 +109,7 @@ async function packDistribution(input: {
 
 async function pack(directory: string) {
   if (process.platform !== "win32") await $`chmod -R 755 .`.cwd(directory)
-  await $`bun pm pack --destination ${npm}`.cwd(directory)
+  await $`bun pm pack --destination ${npmDir}`.cwd(directory)
 }
 
 async function archive(bin: string, target: string, binary: string) {
@@ -122,7 +120,7 @@ async function archive(bin: string, target: string, binary: string) {
   await chmod(source, 0o755)
   await utimes(source, new Date("1980-01-01T00:00:00Z"), new Date("1980-01-01T00:00:00Z"))
   const extension = target.startsWith("linux-") ? "tar.gz" : "zip"
-  const output = path.join(archives, `${binary}-${target}.${extension}`)
+  const output = path.join(archiveDir, `${binary}-${target}.${extension}`)
   await rm(output, { force: true })
   if (extension === "tar.gz") {
     await $`tar --mtime=@0 --owner=0 --group=0 --numeric-owner -czf ${output} -C ${bin} ${executable}`

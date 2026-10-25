@@ -9,7 +9,8 @@
     "test": "bun test --timeout 30000 --only-failures",
     "typecheck": "bun check --no-script && bun check --no-script -p tsconfig.types.json",
     "typecheck:tsc": "tsc --noEmit && tsc --noEmit -p tsconfig.types.json",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "pack": "bun run script/pack.ts"
   },
   "files": [
     "dist"

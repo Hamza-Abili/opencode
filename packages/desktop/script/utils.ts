@@ -21,57 +21,55 @@ export function resolveChannel(): Channel {
 
 export const CLI_BINARIES: Array<{ target: string; package: string; os: string; cpu: string }> = [
   {
-    target: "aarch64-apple-darwin",
+    target: "darwin-arm64",
     package: "@opencode/cli-darwin-arm64",
     os: "darwin",
     cpu: "arm64",
   },
   {
-    target: "x86_64-apple-darwin",
+    target: "darwin-x64",
     package: "@opencode/cli-darwin-x64-baseline",
     os: "darwin",
     cpu: "x64",
   },
   {
-    target: "aarch64-pc-windows-msvc",
+    target: "windows-arm64",
     package: "@opencode/cli-windows-arm64",
     os: "win32",
     cpu: "arm64",
   },
   {
-    target: "x86_64-pc-windows-msvc",
+    target: "windows-x64",
     package: "@opencode/cli-windows-x64-baseline",
     os: "win32",
     cpu: "x64",
   },
   {
-    target: "x86_64-unknown-linux-gnu",
+    target: "linux-x64",
     package: "@opencode/cli-linux-x64-baseline",
     os: "linux",
     cpu: "x64",
   },
   {
-    target: "aarch64-unknown-linux-gnu",
+    target: "linux-arm64",
     package: "@opencode/cli-linux-arm64",
     os: "linux",
     cpu: "arm64",
   },
 ]
 
-export const CLI_TARGET = process.env.OPENCODE_CLI_TARGET
-
 function nativeTarget() {
   const { platform, arch } = process
 
-  if (platform === "darwin") return arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin"
+  if (platform === "darwin") return arch === "arm64" ? "darwin-arm64" : "darwin-x64"
 
-  if (platform === "win32") return arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc"
+  if (platform === "win32") return arch === "arm64" ? "windows-arm64" : "windows-x64"
 
-  if (platform === "linux") return arch === "arm64" ? "aarch64-unknown-linux-gnu" : "x86_64-unknown-linux-gnu"
+  if (platform === "linux") return arch === "arm64" ? "linux-arm64" : "linux-x64"
   throw new Error(`Unsupported platform: ${platform}/${arch}`)
 }
 
-export function getCurrentCli(target = process.env.OPENCODE_CLI_TARGET ?? nativeTarget()) {
+export function getCurrentCli(target = process.env.OPENCODE_TARGET ?? nativeTarget()) {
   const binaryConfig = CLI_BINARIES.find((item) => item.target === target)
 
   if (!binaryConfig) throw new Error(`CLI configuration not available for target '${target}'`)

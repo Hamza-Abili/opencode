@@ -25,7 +25,7 @@ async function main() {
 async function prepareDesktop() {
   await Promise.all([
     $`bun run install-electron`,
-    $`bun ./scripts/copy-icons.ts ${process.env.OPENCODE_CHANNEL ?? "dev"}`,
+    $`bun ./script/copy-icons.ts ${process.env.OPENCODE_CHANNEL ?? "dev"}`,
   ])
 
   if (process.platform === "darwin") process.env.ELECTRON_EXEC_PATH = await prepareDevElectron()

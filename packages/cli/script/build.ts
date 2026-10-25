@@ -27,7 +27,7 @@ await rm(outdir, { recursive: true, force: true })
 
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
-const requestedTarget = process.argv.find((arg) => arg.startsWith("--target="))?.slice("--target=".length)
+const requestedTarget = process.env.OPENCODE_TARGET
 const skipInstall = process.argv.includes("--skip-install")
 const skipWebUi = process.argv.includes("--skip-web-ui")
 const solidPlugin = createSolidTransformPlugin()
@@ -56,7 +56,7 @@ const allTargets: {
 
 const targets =
   requestedTarget !== undefined
-    ? allTargets.filter((item) => targetName(item) === requestedTarget)
+    ? allTargets.filter((item) => targetName(item) === `${binary}-${requestedTarget}`)
     : singleFlag
       ? allTargets.filter((item) => {
           if (item.os !== process.platform || item.arch !== process.arch) return false

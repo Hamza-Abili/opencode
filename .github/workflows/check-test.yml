@@ -116,9 +116,7 @@ jobs:
       - name: Verify packed codemode package
         if: runner.os == 'Linux'
         working-directory: packages/codemode
-        run: bun run script/pack.ts
-        env:
-          OPENCODE_PACK_DIR: ${{ runner.temp }}/codemode-pack
+        run: bun run pack
 
       - name: Verify packed workerd SDK
         if: runner.os == 'Linux'

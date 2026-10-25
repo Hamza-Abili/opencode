@@ -68,8 +68,9 @@ files to be consumed from other origins.
 ## Release Binaries
 
 The `publish` workflow (`.github/workflows/publish.yml`) uploads release files.
-Its `publish-cli` and `publish-desktop` jobs run in the `release` environment
-and never execute repository code: they upload verified, signed build artifacts
+Its `publish-cli` and `publish-desktop` jobs run in the `release` environment,
+check out only `.github/release/`, and never execute repository code:
+`publish-cli.sh` and `publish-desktop.sh` upload verified, signed build artifacts
 to the production bucket for every release channel:
 
 ```text

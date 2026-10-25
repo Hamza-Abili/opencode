@@ -1,32 +1,24 @@
 name: publish
 run-name: "${{ format('release {0}{1}', inputs.bump, inputs.version) }}"
 
-# Building is separated from signing and publishing.
-#
-# - plan decides the version, channel and npm dist-tag from the event, inputs and ref only.
-# - source creates the versioned release commit and its v* tag. It runs git, never repository code.
-# - build-* jobs run repository code. They have no environment, no secrets and no id-token, and
-#   produce artifacts that carry a SHA256SUMS manifest.
-# - sign-* and publish-* jobs run in the release environment. They never check out or execute
-#   repository code: they download artifacts, verify them, treat them as data, and run the short
-#   inline steps below with pinned actions and runner tools.
-# - latest can only be published by a workflow_dispatch with a bump or version on dev.
+# Builds are separated from signing and publishing.
+# - build-* jobs run repository code (`bun run build`, `bun run pack`) with no environment, secrets or id-token.
+# - sign-* and publish-* jobs run in the release environment, check out only .github/release/, and run those
+#   scripts on verified artifacts, which they treat as data. They never execute repository code.
+# - plan decides version, channel and npm dist-tag from the event, inputs and ref; only a dispatch with a bump or
+#   version on dev reaches latest.
+# .github/release/ and this file are the security boundary for releases.
 
 on:
   push:
-    branches:
-      - dev
-      - beta
+    branches: [dev, beta]
   workflow_dispatch:
     inputs:
       bump:
         description: "Bump major, minor, or patch"
         required: false
         type: choice
-        options:
-          - major
-          - minor
-          - patch
+        options: [major, minor, patch]
       version:
         description: "Override version (optional)"
         required: false
@@ -35,10 +27,9 @@ on:
         description: "Reviewed V2 release notes for CHANGELOG.md and the GitHub release (optional)"
         required: false
         type: string
-  # TEMPORARY: proves the build half and dry-runs the sign and publish steps without secrets.
+  # TEMPORARY: runs the build half for real and the sign and publish half as a dry run without secrets.
   pull_request:
-    paths:
-      - .github/workflows/publish.yml
+    paths: [.github/workflows/publish.yml, .github/release/**]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ (inputs.bump || inputs.version) && 'release' || 'build' }}
@@ -53,987 +44,376 @@ defaults:
 
 jobs:
   plan:
-    runs-on: ubuntu-24.04
     if: github.repository == 'anomalyco/opencode'
+    runs-on: ubuntu-24.04
     permissions: {}
     outputs:
       version: ${{ steps.plan.outputs.version }}
       channel: ${{ steps.plan.outputs.channel }}
       npm_tag: ${{ steps.plan.outputs.npm_tag }}
-      desktop_channel: ${{ steps.plan.outputs.desktop_channel }}
       dry_run: ${{ steps.plan.outputs.dry_run }}
-      release: ${{ steps.plan.outputs.release }}
-      sign_cli: ${{ steps.plan.outputs.sign_cli }}
+      cli: ${{ steps.plan.outputs.cli }}
       desktop: ${{ steps.plan.outputs.desktop }}
-      npm: ${{ steps.plan.outputs.npm }}
-      node_cli: ${{ steps.plan.outputs.node_cli }}
+      node: ${{ steps.plan.outputs.node }}
+      release: ${{ steps.plan.outputs.release }}
     steps:
+      - &checkout-release
+        name: Check out release scripts
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: /.github/release/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       - id: plan
+        name: Plan
+        run: bash .github/release/plan-release.sh
         env:
-          EVENT: ${{ github.event_name }}
-          REF: ${{ github.ref }}
-          BUMP: ${{ inputs.bump }}
-          VERSION: ${{ inputs.version }}
-          RUN_NUMBER: ${{ github.run_number }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          versioned=false
-          if [ -n "$BUMP" ] || [ -n "$VERSION" ]; then versioned=true; fi
-          case "$EVENT:$REF:$versioned" in
-            push:refs/heads/dev:false | workflow_dispatch:refs/heads/dev:false) channel=dev ;;
-            workflow_dispatch:refs/heads/dev:true) channel=latest ;;
-            push:refs/heads/beta:false | workflow_dispatch:refs/heads/beta:false) channel=beta ;;
-            pull_request:*:false) channel="pr" ;;
-            *) echo "::error::$EVENT on $REF cannot publish (versioned: $versioned)"; exit 1 ;;
-          esac
+          INPUT_BUMP: ${{ inputs.bump }}
+          INPUT_VERSION: ${{ inputs.version }}
 
-          if [ "$channel" = latest ] && [ -n "$VERSION" ]; then
-            version="$VERSION"
-          elif [ "$channel" = latest ]; then
-            current=$(curl -fsS https://registry.npmjs.org/-/package/@opencode%2fcli/dist-tags | jq -r .latest)
-            if ! [[ "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then echo "::error::Unexpected latest version: $current"; exit 1; fi
-            major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
-            case "$BUMP" in
-              major) version="$((major + 1)).0.0" ;;
-              minor) version="$major.$((minor + 1)).0" ;;
-              *) version="$major.$minor.$((patch + 1))" ;;
-            esac
-            if [ "$major" -lt 2 ]; then version=2.0.0; fi
-          else
-            version="0.0.0-$channel-$RUN_NUMBER"
-            if [ "$RUN_ATTEMPT" != 1 ]; then version="$version.$RUN_ATTEMPT"; fi
-          fi
-
-          if [ "$channel" = latest ]; then
-            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || [[ "$version" == 0.0.0-* ]]; then
-              echo "::error::Invalid release version: $version"
-              exit 1
-            fi
-            status=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@opencode%2fcli/$version")
-            if [ "$status" = 200 ]; then echo "::error::@opencode/cli@$version is already published"; exit 1; fi
-          fi
-
-          case "$channel" in
-            latest) npm_tag=latest desktop_channel=prod release=true sign_cli=true desktop=true npm=true node_cli=false ;;
-            dev) npm_tag=dev desktop_channel=dev release=false sign_cli=true desktop=false npm=true node_cli=true ;;
-            beta) npm_tag="" desktop_channel=beta release=false sign_cli=false desktop=true npm=false node_cli=false ;;
-            pr) npm_tag=pr desktop_channel=prod release=true sign_cli=true desktop=true npm=true node_cli=true ;;
-          esac
-          dry_run=false
-          if [ "$channel" = pr ]; then dry_run=true; fi
-
-          {
-            echo "version=$version"
-            echo "channel=$channel"
-            echo "npm_tag=$npm_tag"
-            echo "desktop_channel=$desktop_channel"
-            echo "dry_run=$dry_run"
-            echo "release=$release"
-            echo "sign_cli=$sign_cli"
-            echo "desktop=$desktop"
-            echo "npm=$npm"
-            echo "node_cli=$node_cli"
-          } | tee -a "$GITHUB_OUTPUT"
-
-  # Creates the commit a versioned release builds from: package.json versions and the changelog on
-  # top of the dispatched dev commit. The v* tag points at it. Runs git only.
-  source:
+  # A versioned release builds from a commit with its versions and changelog on the dispatched dev commit,
+  # tagged v<version>. Runs git only.
+  commit:
     needs: plan
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env: &env
+      OPENCODE_VERSION: ${{ needs.plan.outputs.version }}
+      OPENCODE_CHANNEL: ${{ needs.plan.outputs.channel }}
+      OPENCODE_NPM_TAG: ${{ needs.plan.outputs.npm_tag }}
+      OPENCODE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
     outputs:
       sha: ${{ steps.commit.outputs.sha || github.sha }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Check out
         if: needs.plan.outputs.channel == 'latest'
-        with:
-          ref: ${{ github.sha }}
-
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - id: commit
+        name: Commit
         if: needs.plan.outputs.channel == 'latest'
+        run: bash .github/release/commit-release.sh
         env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          NOTES: ${{ inputs.release_notes }}
-        run: |
-          tag="v$VERSION"
-          git ls-files -z -- '*package.json' bun.lock | xargs -0 sed -i -E "s/\"version\": \"[^\"]+\"/\"version\": \"$VERSION\"/g"
+          OPENCODE_RELEASE_NOTES: ${{ inputs.release_notes }}
 
-          if [ -n "$NOTES" ] && ! grep -qF -x "## $tag" CHANGELOG.md && ! grep -qF "## $tag " CHANGELOG.md; then
-            printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
-            awk -v entry="## $tag — $(date -u +%F)" -v notes="$RUNNER_TEMP/notes.md" '
-              function emit() { print entry; print ""; while ((getline line < notes) > 0) print line; print ""; done = 1 }
-              !done && /^## / { emit() }
-              { print }
-              END { if (!done) { print ""; emit() } }
-            ' CHANGELOG.md > "$RUNNER_TEMP/CHANGELOG.md"
-            mv "$RUNNER_TEMP/CHANGELOG.md" CHANGELOG.md
-          fi
-
-          if git diff --name-only | grep -vE '(^|/)package\.json$|^bun\.lock$|^CHANGELOG\.md$'; then
-            echo "::error::The release commit may only change versions and the changelog"
-            exit 1
-          fi
-
-          git -c core.hooksPath=/dev/null \
-            -c user.name="github-actions[bot]" \
-            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit --no-verify -q -am "release: $tag"
-
-          # A rerun reuses the tag when it holds the same tree.
-          existing=$(git ls-remote origin "refs/tags/$tag" | cut -f1)
-          if [ -n "$existing" ]; then
-            git fetch -q --depth=1 origin "refs/tags/$tag"
-            if [ "$(git rev-parse "$existing^{tree}")" != "$(git rev-parse "HEAD^{tree}")" ]; then
-              echo "::error::Tag $tag already exists with different contents"
-              exit 1
-            fi
-            echo "sha=$existing" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git push -q origin "HEAD:refs/tags/$tag"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-  # ---------------------------------------------------------------------------
-  # Build: repository code, no environment, no secrets, no id-token.
-  # ---------------------------------------------------------------------------
+  # ---- Build: repository code; no environment, secrets or id-token --------------------------------------------
 
   build-cli:
-    needs: [plan, source]
+    needs: [plan, commit]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
+    env: *env
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - &checkout
+        name: Check out
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: ${{ needs.source.outputs.sha }}
+          ref: ${{ needs.commit.outputs.sha }}
           persist-credentials: false
-
-      - uses: ./.github/actions/setup-bun
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
         with:
           bun-version: 1.4.4
-
-      - name: Build CLI
-        run: ./packages/cli/script/build.ts
+      - name: Build
+        working-directory: packages/cli
+        run: bun run build && rm -rf dist/.bun
         env:
           BUN_COMPILE_RELEASE: bun-v1.4.4
-          OPENCODE_VERSION: ${{ needs.plan.outputs.version }}
-          OPENCODE_CHANNEL: ${{ needs.plan.outputs.channel }}
           OPENCODE_RELEASE_NOTES: ${{ needs.plan.outputs.channel == 'latest' && inputs.release_notes || '' }}
-          # Read-only; raises the rate limit for Bun release downloads.
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Stage artifact
-        run: |
-          mkdir -p "$RUNNER_TEMP/out"
-          cp -R packages/cli/dist/cli-* "$RUNNER_TEMP/out/"
-          cd "$RUNNER_TEMP/out"
-          find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do sha256sum "$f"; done > SHA256SUMS
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          GH_TOKEN: ${{ github.token }} # read-only; raises the rate limit for Bun release downloads
+      - name: Upload
+        uses: ./.github/release/upload
         with:
-          name: cli-dist
-          path: ${{ runner.temp }}/out
-          if-no-files-found: error
+          name: build-cli
+          path: packages/cli/dist
 
-  build-node-app-archive:
-    needs: [plan, source]
-    if: needs.plan.outputs.node_cli == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          ref: ${{ needs.source.outputs.sha }}
-          persist-credentials: false
-
-      - uses: ./.github/actions/setup-bun
-
-      - name: Build app archive
-        run: bun packages/cli/script/build-node.ts --app-archive-only --app-archive=.cache/app-archive.bin --skip-install
-        env:
-          OPENCODE_VERSION: ${{ needs.plan.outputs.version }}
-          OPENCODE_CHANNEL: ${{ needs.plan.outputs.channel }}
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: node-app-archive
-          path: packages/cli/.cache/app-archive.bin
-          if-no-files-found: error
-
-  build-node-cli:
-    needs: [plan, source, build-node-app-archive]
-    if: needs.plan.outputs.node_cli == 'true'
+  build-node:
+    needs: [plan, commit]
+    if: needs.plan.outputs.node == 'true'
     strategy:
       fail-fast: false
       matrix:
-        settings:
-          - target: linux-arm64
-            host: blacksmith-4vcpu-ubuntu-2404-arm
-          - target: linux-x64
-            host: blacksmith-4vcpu-ubuntu-2404
-          - target: darwin-arm64
-            host: macos-26
-          - target: windows-arm64
-            host: blacksmith-4vcpu-windows-2025
-            bun_install_flags: --cpu=*
-          - target: windows-x64
-            host: blacksmith-4vcpu-windows-2025
-    runs-on: ${{ matrix.settings.host }}
+        include:
+          - { target: linux-arm64, host: blacksmith-4vcpu-ubuntu-2404-arm }
+          - { target: linux-x64, host: blacksmith-4vcpu-ubuntu-2404 }
+          - { target: darwin-arm64, host: macos-26 }
+          - { target: windows-arm64, host: blacksmith-4vcpu-windows-2025 }
+          - { target: windows-x64, host: blacksmith-4vcpu-windows-2025 }
+    runs-on: ${{ matrix.host }}
+    env: *env
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          ref: ${{ needs.source.outputs.sha }}
-          persist-credentials: false
-
-      - uses: ./.github/actions/setup-bun
-        with:
-          install-flags: ${{ matrix.settings.bun_install_flags }}
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - *checkout
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "26.4.0"
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: node-app-archive
-          path: packages/cli/.cache
-
       - name: Build
-        run: bun packages/cli/script/build-node.ts --target="$TARGET" --skip-install --outdir=dist/node --app-archive=.cache/app-archive.bin
+        working-directory: packages/cli
+        run: bun run build:node
         env:
-          TARGET: ${{ matrix.settings.target }}
-          OPENCODE_VERSION: ${{ needs.plan.outputs.version }}
-          OPENCODE_CHANNEL: ${{ needs.plan.outputs.channel }}
-
-      - name: Verify service lifecycle
-        if: matrix.settings.target != 'windows-arm64'
+          OPENCODE_TARGET: ${{ matrix.target }}
+      - name: Test
+        if: matrix.target != 'windows-arm64'
         working-directory: packages/cli
         run: bun run script/service-smoke.ts --node
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Upload
+        uses: ./.github/release/upload
         with:
-          name: node-cli-${{ matrix.settings.target }}
-          path: packages/cli/dist/node/cli-node-*
-          if-no-files-found: error
+          name: build-node-${{ matrix.target }}
+          path: packages/cli/dist/node
 
-  # Packs every npm package (libraries, the CLI wrapper and all platform packages) and the Linux and
-  # Node CLI archives. macOS and Windows CLI packages are re-packed after signing.
+  # `bun run pack` packs every npm package into dist/npm and the Linux and Node CLI archives into dist/archives.
+  # The macOS and Windows CLI packages and archives are re-packed after signing.
   build-npm:
-    needs: [plan, source, build-cli, build-node-cli]
-    if: ${{ !cancelled() && !failure() && (needs.plan.outputs.npm == 'true' || needs.plan.outputs.release == 'true') }}
+    needs: [plan, commit, build-cli, build-node]
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.cli == 'true' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
+    env: *env
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - *checkout
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+      - &download-cli
+        name: Download
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          ref: ${{ needs.source.outputs.sha }}
-          persist-credentials: false
-
-      - uses: ./.github/actions/setup-bun
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-dist
+          name: build-cli
           path: packages/cli/dist
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        if: needs.plan.outputs.node_cli == 'true'
+      - name: Download Node CLI
+        if: needs.plan.outputs.node == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: node-cli-*
+          pattern: build-node-*
           path: packages/cli/dist/node
           merge-multiple: true
-
       - name: Pack
-        run: |
-          rm packages/cli/dist/SHA256SUMS
-          bun ./script/pack.ts
-        env:
-          OPENCODE_VERSION: ${{ needs.plan.outputs.version }}
-          OPENCODE_CHANNEL: ${{ needs.plan.outputs.channel }}
-
-      - name: Stage artifacts
-        run: |
-          out="$RUNNER_TEMP/out"
-          mkdir -p "$out/npm" "$out/cli-npm-macos" "$out/cli-npm-windows" "$out/cli-archives"
-          mv dist/npm/opencode-cli-darwin-*.tgz "$out/cli-npm-macos/"
-          mv dist/npm/opencode-cli-windows-*.tgz "$out/cli-npm-windows/"
-          mv dist/npm/*.tgz "$out/npm/"
-          mv dist/archives/* "$out/cli-archives/"
-          for dir in "$out"/*; do
-            (cd "$dir" && find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do sha256sum "$f"; done > SHA256SUMS)
-            cat "$dir/SHA256SUMS"
-          done
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        run: rm packages/cli/dist/SHA256SUMS && bun run pack
+      - name: Upload
+        uses: ./.github/release/upload
         with:
-          name: npm
-          path: ${{ runner.temp }}/out/npm
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          name: build-npm
+          path: dist/npm
+      - name: Upload archives
+        uses: ./.github/release/upload
         with:
-          name: cli-npm-macos
-          path: ${{ runner.temp }}/out/cli-npm-macos
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: cli-npm-windows
-          path: ${{ runner.temp }}/out/cli-npm-windows
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: cli-archives
-          path: ${{ runner.temp }}/out/cli-archives
-          if-no-files-found: error
+          name: build-archives
+          path: dist/archives
 
   build-docker:
-    needs: [plan, source, build-cli]
+    needs: [plan, commit, build-cli]
     if: needs.plan.outputs.release == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    env: *env
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - *checkout
+      - *download-cli
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Pack
+        working-directory: packages/cli
+        run: bun run pack:docker
+      - name: Upload
+        uses: ./.github/release/upload
         with:
-          ref: ${{ needs.source.outputs.sha }}
-          persist-credentials: false
+          name: build-docker
+          path: dist/docker
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-dist
-          path: packages/cli/dist
-
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-
-      - name: Build image
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-        run: |
-          chmod +x packages/cli/dist/cli-linux-*-musl/bin/opencode
-          mkdir -p "$RUNNER_TEMP/out"
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --tag "ghcr.io/anomalyco/opencode:$VERSION" \
-            --output "type=oci,dest=$RUNNER_TEMP/out/opencode-image.tar" \
-            packages/cli
-          cd "$RUNNER_TEMP/out" && sha256sum opencode-image.tar > SHA256SUMS
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: docker-image
-          path: ${{ runner.temp }}/out
-          if-no-files-found: error
-
+  # macOS and Windows pack an unsigned app; Linux packs the final AppImage, deb and rpm.
   build-desktop:
-    needs: [plan, source, build-cli]
+    needs: [plan, commit, build-cli]
     if: needs.plan.outputs.desktop == 'true'
     strategy:
       fail-fast: false
       matrix:
-        settings:
-          - host: macos-26-intel
-            target: x86_64-apple-darwin
-            os: mac
-            arch: x64
-            bun_install_flags: --os=darwin --cpu=x64
-          - host: macos-26
-            target: aarch64-apple-darwin
-            os: mac
-            arch: arm64
-            bun_install_flags: --os=darwin --cpu=arm64
-          # github-hosted: blacksmith lacks ARM64 MSVC cross-compilation toolchain
-          - host: windows-2025
-            target: aarch64-pc-windows-msvc
-            os: win
-            arch: arm64
-            bun_install_flags: --cpu=*
-          - host: blacksmith-4vcpu-windows-2025
-            target: x86_64-pc-windows-msvc
-            os: win
-            arch: x64
-          - host: blacksmith-4vcpu-ubuntu-2404
-            target: x86_64-unknown-linux-gnu
-            os: linux
-            arch: x64
-          - host: blacksmith-4vcpu-ubuntu-2404-arm
-            target: aarch64-unknown-linux-gnu
-            os: linux
-            arch: arm64
-    runs-on: ${{ matrix.settings.host }}
-    env:
-      OPENCODE_VERSION: ${{ needs.plan.outputs.version }}
-      OPENCODE_CHANNEL: ${{ needs.plan.outputs.desktop_channel }}
-      OPENCODE_CLI_TARGET: ${{ matrix.settings.target }}
-      OPENCODE_CLI_DIST: ${{ github.workspace }}/packages/cli/dist
+        include:
+          - { target: darwin-x64, host: macos-26-intel, install: --os=darwin --cpu=x64 }
+          - { target: darwin-arm64, host: macos-26, install: --os=darwin --cpu=arm64 }
+          # github-hosted: blacksmith lacks the ARM64 MSVC cross-compilation toolchain
+          - { target: windows-arm64, host: windows-2025, install: --cpu=* }
+          - { target: windows-x64, host: blacksmith-4vcpu-windows-2025 }
+          - { target: linux-x64, host: blacksmith-4vcpu-ubuntu-2404 }
+          - { target: linux-arm64, host: blacksmith-4vcpu-ubuntu-2404-arm }
+    runs-on: ${{ matrix.host }}
+    env: *env
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - *checkout
+      - *download-cli
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
         with:
-          ref: ${{ needs.source.outputs.sha }}
-          persist-credentials: false
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-dist
-          path: packages/cli/dist
-
-      - uses: ./.github/actions/setup-bun
-        with:
-          install-flags: ${{ matrix.settings.bun_install_flags }}
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: "24"
-
-      - name: Install rpm
-        if: matrix.settings.os == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends rpm
-
-      - name: Prepare
-        run: bun ./scripts/prepare.ts
-        working-directory: packages/desktop
-
+          install-flags: ${{ matrix.install }}
+      - name: Set up rpm
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
       - name: Build
-        run: bun run build
         working-directory: packages/desktop
+        run: bun run build
         env:
+          OPENCODE_TARGET: ${{ matrix.target }}
           NODE_OPTIONS: --max-old-space-size=4096
           VITE_SENTRY_DSN: ${{ vars.WEB_SENTRY_DSN }}
           VITE_SENTRY_ENVIRONMENT: ${{ needs.plan.outputs.channel == 'beta' && 'beta' || 'production' }}
           VITE_SENTRY_RELEASE: desktop@${{ needs.plan.outputs.version }}
-
-      # macOS and Windows produce an unsigned app directory. The release environment signs it.
-      - name: Package
+      - name: Pack
         working-directory: packages/desktop
         timeout-minutes: 60
+        run: bun run pack
         env:
-          OS: ${{ matrix.settings.os }}
-          ARCH: ${{ matrix.settings.arch }}
-        run: |
-          flags=("--$OS" "--$ARCH" --publish never --config electron-builder.config.ts)
-          if [ "$OS" = mac ]; then flags+=(--dir -c.mac.identity=null); fi
-          if [ "$OS" = win ]; then flags+=(--dir); fi
-          npx electron-builder "${flags[@]}"
-
-      - name: Stage artifact
-        env:
-          OS: ${{ matrix.settings.os }}
-          ARCH: ${{ matrix.settings.arch }}
-        run: |
-          if command -v cygpath > /dev/null; then RUNNER_TEMP=$(cygpath -u "$RUNNER_TEMP"); fi
-          out="$RUNNER_TEMP/out"
-          mkdir -p "$out"
-          cd packages/desktop/dist
-          case "$OS" in
-            mac)
-              app=$(find . -maxdepth 2 -path "./mac*/*.app" -type d)
-              if [ "$(printf '%s\n' "$app" | grep -c .)" != 1 ]; then echo "Expected one .app bundle, found: $app"; exit 1; fi
-              tar -cf "$out/opencode-desktop-mac-$ARCH.app.tar" -C "$(dirname "$app")" "$(basename "$app")"
-              ;;
-            win)
-              unpacked=$(find . -maxdepth 1 -name "*-unpacked" -type d)
-              if [ "$(printf '%s\n' "$unpacked" | grep -c .)" != 1 ]; then echo "Expected one unpacked app, found: $unpacked"; exit 1; fi
-              cp -R "$unpacked" "$out/app"
-              ;;
-            linux)
-              cp opencode-desktop-linux-*.AppImage opencode-desktop-linux-*.deb opencode-desktop-linux-*.rpm "$out/"
-              ;;
-          esac
-          cd "$out"
-          find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do
-            if command -v sha256sum >/dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi
-          done > SHA256SUMS
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          OPENCODE_TARGET: ${{ matrix.target }}
+      - name: Upload
+        uses: ./.github/release/upload
         with:
-          name: desktop-unsigned-${{ matrix.settings.target }}
-          path: ${{ runner.temp }}/out
-          if-no-files-found: error
+          name: build-desktop-${{ matrix.target }}
+          path: dist/desktop
 
-  # electron-builder packages the NSIS installer around the signed app. This still runs repository
-  # config, so it is a build job; the installer it produces is signed in the next stage.
-  package-desktop-windows:
-    needs: [plan, source, sign-desktop-windows]
+  # Packs the NSIS installer around the signed app. This runs repository config, so it is a build job; the
+  # installer is signed next.
+  build-installer:
+    needs: [plan, commit, sign-windows]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.desktop == 'true' }}
     strategy:
       fail-fast: false
       matrix:
-        settings:
-          - host: windows-2025
-            target: aarch64-pc-windows-msvc
-            arch: arm64
-            bun_install_flags: --cpu=*
-          - host: blacksmith-4vcpu-windows-2025
-            target: x86_64-pc-windows-msvc
-            arch: x64
-    runs-on: ${{ matrix.settings.host }}
+        include:
+          - { target: windows-arm64, host: windows-2025, install: --cpu=* }
+          - { target: windows-x64, host: blacksmith-4vcpu-windows-2025 }
+    runs-on: ${{ matrix.host }}
+    env: *env
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - *checkout
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
         with:
-          ref: ${{ needs.source.outputs.sha }}
-          persist-credentials: false
-
-      - uses: ./.github/actions/setup-bun
+          install-flags: ${{ matrix.install }}
+      - name: Download
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          install-flags: ${{ matrix.settings.bun_install_flags }}
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: "24"
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ needs.plan.outputs.dry_run == 'true' && 'desktop-unsigned' || 'desktop-signed-app' }}-${{ matrix.settings.target }}
-          path: ${{ runner.temp }}/signed
-
-      - name: Package installer
+          name: sign-desktop-${{ matrix.target }}
+          path: ${{ runner.temp }}/app
+      - name: Pack
         working-directory: packages/desktop
         timeout-minutes: 30
+        run: bun run pack
         env:
-          OPENCODE_VERSION: ${{ needs.plan.outputs.version }}
-          OPENCODE_CHANNEL: ${{ needs.plan.outputs.desktop_channel }}
-          OPENCODE_CLI_TARGET: ${{ matrix.settings.target }}
-          ARCH: ${{ matrix.settings.arch }}
-        run: |
-          RUNNER_TEMP=$(cygpath -u "$RUNNER_TEMP")
-          npm pkg set "version=$OPENCODE_VERSION"
-          bun ./scripts/copy-icons.ts "$OPENCODE_CHANNEL"
-          npx electron-builder --win "--$ARCH" --prepackaged "$RUNNER_TEMP/signed/app" --publish never --config electron-builder.config.ts
-          out="$RUNNER_TEMP/out"
-          mkdir -p "$out"
-          cp "dist/opencode-desktop-win-$ARCH.exe" "$out/"
-          cd "$out" && sha256sum "opencode-desktop-win-$ARCH.exe" > SHA256SUMS
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          OPENCODE_TARGET: ${{ matrix.target }}
+          OPENCODE_DESKTOP_APP: ${{ runner.temp }}/app/app
+      - name: Upload
+        uses: ./.github/release/upload
         with:
-          name: desktop-installer-unsigned-${{ matrix.settings.target }}
-          path: ${{ runner.temp }}/out
-          if-no-files-found: error
+          name: build-installer-${{ matrix.target }}
+          path: dist/desktop
 
-  # Attests what the build jobs produced. Runs no repository code; holds id-token only for Sigstore.
-  attest:
+  # ---- Sign: release environment; only .github/release/ is checked out ----------------------------------------
+  # Pull requests run sign and publish jobs without an environment, so steps that need a secret skip or dry-run.
+
+  # Build provenance for the npm tarballs and Linux archives. No secrets; id-token only for Sigstore.
+  sign-provenance:
     needs: [plan, build-npm]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.dry_run != 'true' && needs.plan.outputs.channel != 'beta' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.cli == 'true' && needs.plan.outputs.dry_run != 'true' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - *checkout-release
+      - name: Download
+        uses: ./.github/release/download
         with:
-          pattern: "{npm,cli-archives}"
-          path: artifacts
-
-      - name: Verify checksums
-        run: |
-          for dir in artifacts/*; do
-            (cd "$dir"
-              sha256sum -c --strict SHA256SUMS
-              diff <(find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort) <(cut -c67- SHA256SUMS | LC_ALL=C sort))
-          done
-
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+          pattern: "{build-npm,build-archives}"
+      - name: Sign
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
-            artifacts/npm/*.tgz
-            artifacts/cli-archives/opencode*
+            ${{ runner.temp }}/in/build-npm/*.tgz
+            ${{ runner.temp }}/in/build-archives/opencode*
 
-  # ---------------------------------------------------------------------------
-  # Sign: environment release. No repository checkout, no repository code.
-  # On pull requests these run without an environment and skip every step that needs a secret.
-  # ---------------------------------------------------------------------------
-
-  sign-cli-macos:
-    needs: [plan, build-npm]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.sign_cli == 'true' }}
-    runs-on: macos-26
-    environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
-    permissions:
-      contents: read
-    outputs:
-      digest: ${{ steps.stage.outputs.digest }}
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-npm-macos
-          path: ${{ runner.temp }}/in
-
-      - name: Verify artifact
-        working-directory: ${{ runner.temp }}/in
-        run: |
-          shasum -a 256 -c SHA256SUMS
-          diff <(find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort) <(cut -c67- SHA256SUMS | LC_ALL=C sort)
-
-      - uses: apple-actions/import-codesign-certs@8f3fb608891dd2244cdab3d69cd68c0d37a7fe93 # v2.0.0
-        if: needs.plan.outputs.dry_run != 'true'
-        with:
-          keychain: build
-          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
-          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-
-      - name: Sign and re-pack
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-        run: |
-          cat > "$RUNNER_TEMP/cli.entitlements" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>com.apple.security.cs.allow-jit</key>
-              <true/>
-              <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-              <true/>
-              <key>com.apple.security.cs.disable-executable-page-protection</key>
-              <true/>
-              <key>com.apple.security.cs.allow-dyld-environment-variables</key>
-              <true/>
-              <key>com.apple.security.cs.disable-library-validation</key>
-              <true/>
-          </dict>
-          </plist>
-          EOF
-          identity=- timestamp=--timestamp=none
-          if [ "$DRY_RUN" != true ]; then
-            identity=$(security find-identity -v -p codesigning build.keychain | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)
-            if [ -z "$identity" ]; then echo "Developer ID Application identity not found"; exit 1; fi
-            timestamp=--timestamp
-          fi
-
-          out="$RUNNER_TEMP/out"
-          mkdir -p "$out"
-          export COPYFILE_DISABLE=1
-          for target in darwin-arm64 darwin-x64 darwin-x64-baseline; do
-            tgz="$RUNNER_TEMP/in/opencode-cli-$target-$VERSION.tgz"
-            work="$RUNNER_TEMP/work/$target"
-            mkdir -p "$work"
-            tar -xzf "$tgz" -C "$work"
-            bin="$work/package/bin/opencode"
-            file -b "$bin" | grep -q '^Mach-O'
-            chmod 755 "$bin"
-            codesign --force "$timestamp" --options runtime --entitlements "$RUNNER_TEMP/cli.entitlements" --sign "$identity" "$bin"
-            codesign --verify --strict --verbose=2 "$bin"
-            tar --no-mac-metadata -czf "$out/opencode-cli-$target-$VERSION.tgz" -C "$work" package
-            touch -t 198001010000 "$bin"
-            (cd "$work/package/bin" && zip -X -q "$out/opencode-$target.zip" opencode)
-          done
-
-      - id: stage
-        working-directory: ${{ runner.temp }}/out
-        run: |
-          find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do shasum -a 256 "$f"; done > SHA256SUMS
-          cat SHA256SUMS
-          echo "digest=$(shasum -a 256 SHA256SUMS | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: cli-macos-signed
-          path: ${{ runner.temp }}/out
-          if-no-files-found: error
-
-  sign-cli-windows:
-    needs: [plan, build-npm]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.sign_cli == 'true' }}
-    runs-on: windows-2025
-    environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
-    permissions:
-      contents: read
-      id-token: write
-    outputs:
-      digest: ${{ steps.stage.outputs.digest }}
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-npm-windows
-          path: ${{ runner.temp }}/in
-
-      - name: Verify and unpack
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-        run: |
-          RUNNER_TEMP=$(cygpath -u "$RUNNER_TEMP")
-          cd "$RUNNER_TEMP/in"
-          sha256sum -c --strict SHA256SUMS
-          diff <(find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort) <(cut -c67- SHA256SUMS | LC_ALL=C sort)
-          for target in windows-arm64 windows-x64 windows-x64-baseline; do
-            mkdir -p "$RUNNER_TEMP/work/$target"
-            tar -xzf "opencode-cli-$target-$VERSION.tgz" -C "$RUNNER_TEMP/work/$target"
-            test -s "$RUNNER_TEMP/work/$target/package/bin/opencode.exe"
-          done
-
-      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
-        if: needs.plan.outputs.dry_run != 'true'
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - uses: azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16 # v1.2.0
-        if: needs.plan.outputs.dry_run != 'true'
-        with:
-          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
-          files: |
-            ${{ runner.temp }}\work\windows-arm64\package\bin\opencode.exe
-            ${{ runner.temp }}\work\windows-x64\package\bin\opencode.exe
-            ${{ runner.temp }}\work\windows-x64-baseline\package\bin\opencode.exe
-          exclude-environment-credential: true
-          exclude-workload-identity-credential: true
-          exclude-managed-identity-credential: true
-          exclude-shared-token-cache-credential: true
-          exclude-visual-studio-credential: true
-          exclude-visual-studio-code-credential: true
-          exclude-azure-cli-credential: false
-          exclude-azure-powershell-credential: true
-          exclude-azure-developer-cli-credential: true
-          exclude-interactive-browser-credential: true
-
-      - name: Verify signatures
-        if: needs.plan.outputs.dry_run != 'true'
-        shell: pwsh
-        run: |
-          Get-ChildItem "$env:RUNNER_TEMP\work" -Recurse -Filter opencode.exe | ForEach-Object {
-            $sig = Get-AuthenticodeSignature $_.FullName
-            if ($sig.Status -ne "Valid") { throw "Invalid signature for $($_.FullName): $($sig.Status)" }
-          }
-
-      - name: Re-pack npm packages
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-        run: |
-          RUNNER_TEMP=$(cygpath -u "$RUNNER_TEMP")
-          mkdir -p "$RUNNER_TEMP/out"
-          for target in windows-arm64 windows-x64 windows-x64-baseline; do
-            tar -czf "$RUNNER_TEMP/out/opencode-cli-$target-$VERSION.tgz" -C "$RUNNER_TEMP/work/$target" package
-          done
-
-      - name: Create archives
-        shell: pwsh
-        run: |
-          foreach ($target in "windows-arm64", "windows-x64", "windows-x64-baseline") {
-            Compress-Archive -Path "$env:RUNNER_TEMP\work\$target\package\bin\opencode.exe" -DestinationPath "$env:RUNNER_TEMP\out\opencode-$target.zip"
-          }
-
-      - id: stage
-        working-directory: ${{ runner.temp }}/out
-        run: |
-          find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do sha256sum "$f"; done > SHA256SUMS
-          cat SHA256SUMS
-          echo "digest=$(sha256sum SHA256SUMS | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: cli-windows-signed
-          path: ${{ runner.temp }}/out
-          if-no-files-found: error
-
-  # Signs both macOS apps inside-out, notarizes them in one submission, staples them, and only then
-  # builds the zip, dmg and .app.tar.gz from the signed apps.
-  sign-desktop-macos:
-    needs: [plan, build-desktop]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.desktop == 'true' }}
+  # Signs the macOS CLI; signs the desktop apps inside-out, notarizes them in one submission, staples them, and
+  # only then builds the zip, dmg and .app.tar.gz from the stapled apps.
+  sign-macos:
+    needs: [plan, build-npm, build-desktop]
+    if: ${{ !cancelled() && !failure() && (needs.plan.outputs.cli == 'true' || needs.plan.outputs.desktop == 'true') }}
     runs-on: macos-26
     timeout-minutes: 90
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
-    permissions:
-      contents: read
+    env: *env
     outputs:
-      digest: ${{ steps.stage.outputs.digest }}
+      digest: ${{ steps.upload.outputs.digest }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - *checkout-release
+      - name: Download
+        uses: ./.github/release/download
         with:
-          name: desktop-unsigned-aarch64-apple-darwin
-          path: ${{ runner.temp }}/in/arm64
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: desktop-unsigned-x86_64-apple-darwin
-          path: ${{ runner.temp }}/in/x64
-
-      - name: Verify and unpack
-        run: |
-          for arch in arm64 x64; do
-            (cd "$RUNNER_TEMP/in/$arch"
-              shasum -a 256 -c SHA256SUMS
-              diff <(find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort) <(cut -c67- SHA256SUMS | LC_ALL=C sort))
-            mkdir -p "$RUNNER_TEMP/apps/$arch"
-            tar -xf "$RUNNER_TEMP/in/$arch/opencode-desktop-mac-$arch.app.tar" -C "$RUNNER_TEMP/apps/$arch"
-            if [ "$(find "$RUNNER_TEMP/apps/$arch" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" != 1 ] || [ "$(find "$RUNNER_TEMP/apps/$arch" -mindepth 1 -maxdepth 1 -name '*.app' -type d | wc -l | tr -d ' ')" != 1 ]; then
-              echo "Expected exactly one .app bundle for $arch"
-              exit 1
-            fi
-          done
-
-      - uses: apple-actions/import-codesign-certs@8f3fb608891dd2244cdab3d69cd68c0d37a7fe93 # v2.0.0
+          pattern: "{build-npm,build-desktop-darwin-*}"
+      - name: Import certificate
         if: needs.plan.outputs.dry_run != 'true'
+        uses: apple-actions/import-codesign-certs@8f3fb608891dd2244cdab3d69cd68c0d37a7fe93 # v2.0.0
         with:
           keychain: build
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-
-      - name: Sign apps
-        env:
-          DRY_RUN: ${{ needs.plan.outputs.dry_run }}
+      - name: Sign CLI
+        if: needs.plan.outputs.cli == 'true'
+        run: bash .github/release/sign-cli-macos.sh "$RUNNER_TEMP/in/build-npm" "$RUNNER_TEMP/out"
+      - name: Sign desktop
+        if: needs.plan.outputs.desktop == 'true'
         run: |
-          cat > "$RUNNER_TEMP/app.entitlements" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>com.apple.security.cs.allow-jit</key>
-              <true/>
-              <key>com.apple.security.device.audio-input</key>
-              <true/>
-          </dict>
-          </plist>
-          EOF
-          # The bundled Bun CLI loads bun-pty's native library; Electron and its helpers do not need this exception.
-          cat > "$RUNNER_TEMP/cli.entitlements" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>com.apple.security.cs.allow-jit</key>
-              <true/>
-              <key>com.apple.security.cs.disable-library-validation</key>
-              <true/>
-          </dict>
-          </plist>
-          EOF
-          identity=- timestamp=--timestamp=none
-          if [ "$DRY_RUN" != true ]; then
-            identity=$(security find-identity -v -p codesigning build.keychain | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)
-            if [ -z "$identity" ]; then echo "Developer ID Application identity not found"; exit 1; fi
-            timestamp=--timestamp
-          fi
-          sign() {
-            codesign --force "$timestamp" --options runtime --entitlements "$2" --sign "$identity" "$1"
-          }
-
-          for arch in arm64 x64; do
-            app=$(find "$RUNNER_TEMP/apps/$arch" -mindepth 1 -maxdepth 1 -name '*.app' -type d)
-            # Every nested Mach-O file and bundle, deepest first, then the app itself.
-            {
-              find "$app/Contents" -type f -print0 | while IFS= read -r -d '' f; do
-                case "$(file -b --mime-type "$f")" in application/x-mach-binary*) printf '%s\n' "$f" ;; esac
-              done
-              find "$app/Contents" -type d \( -name '*.app' -o -name '*.framework' \) -print
-            } | awk -F/ '{ print NF "\t" $0 }' | sort -t "$(printf '\t')" -k1,1nr | cut -f2- > "$RUNNER_TEMP/sign-$arch.txt"
-            echo "Signing $(wc -l < "$RUNNER_TEMP/sign-$arch.txt" | tr -d ' ') items in $app"
-            while IFS= read -r item; do
-              if [ "$item" = "$app/Contents/Resources/opencode-cli" ]; then
-                sign "$item" "$RUNNER_TEMP/cli.entitlements"
-              else
-                sign "$item" "$RUNNER_TEMP/app.entitlements"
-              fi
-            done < "$RUNNER_TEMP/sign-$arch.txt"
-            sign "$app" "$RUNNER_TEMP/app.entitlements"
-            codesign --verify --deep --strict --verbose=2 "$app"
-          done
-
-      - name: Notarize and staple
-        if: needs.plan.outputs.dry_run != 'true'
+          bash .github/release/sign-desktop-macos.sh "$RUNNER_TEMP/out" \
+            "$RUNNER_TEMP"/in/build-desktop-darwin-*/opencode-desktop-mac-*.app.tar
         env:
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_PATH }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: |
-          key="$RUNNER_TEMP/apple-api-key.p8"
-          printf '%s\n' "$APPLE_API_KEY_CONTENT" > "$key"
-          ditto -c -k --sequesterRsrc "$RUNNER_TEMP/apps" "$RUNNER_TEMP/notarize.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
-            --key "$key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" \
-            --wait --timeout 60m --output-format json > "$RUNNER_TEMP/notarize.json"
-          rm -f "$key"
-          cat "$RUNNER_TEMP/notarize.json"
-          if [ "$(jq -r .status "$RUNNER_TEMP/notarize.json")" != Accepted ]; then
-            echo "Notarization was not accepted"
-            exit 1
-          fi
-          for arch in arm64 x64; do
-            app=$(find "$RUNNER_TEMP/apps/$arch" -mindepth 1 -maxdepth 1 -name '*.app' -type d)
-            xcrun stapler staple "$app"
-            xcrun stapler validate "$app"
-            spctl --assess --type execute --verbose=2 "$app"
-          done
-
-      - name: Package signed apps
-        run: |
-          out="$RUNNER_TEMP/out"
-          mkdir -p "$out"
-          for arch in arm64 x64; do
-            app=$(find "$RUNNER_TEMP/apps/$arch" -mindepth 1 -maxdepth 1 -name '*.app' -type d)
-            name=$(basename "$app")
-            ditto -c -k --sequesterRsrc --keepParent "$app" "$out/opencode-desktop-mac-$arch.zip"
-            staging="$RUNNER_TEMP/dmg-$arch"
-            mkdir -p "$staging"
-            ditto "$app" "$staging/$name"
-            ln -s /Applications "$staging/Applications"
-            hdiutil create -volname "${name%.app}" -srcfolder "$staging" -fs HFS+ -format UDZO -ov "$out/opencode-desktop-mac-$arch.dmg"
-            COPYFILE_DISABLE=1 tar --no-mac-metadata -czf "$out/opencode-desktop-mac-$arch.app.tar.gz" -C "$(dirname "$app")" "$name"
-          done
-
-      - id: stage
-        working-directory: ${{ runner.temp }}/out
-        run: |
-          find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do shasum -a 256 "$f"; done > SHA256SUMS
-          cat SHA256SUMS
-          echo "digest=$(shasum -a 256 SHA256SUMS | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - id: upload
+        name: Upload
+        uses: ./.github/release/upload
         with:
-          name: desktop-macos
+          name: sign-macos
           path: ${{ runner.temp }}/out
-          if-no-files-found: error
 
-  # Signs every executable and native module in both unpacked Windows apps before the installer is built.
-  sign-desktop-windows:
-    needs: [plan, build-desktop]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.desktop == 'true' && needs.plan.outputs.dry_run != 'true' }}
+  # Signs the Windows CLI and every executable and native module of the unpacked desktop apps.
+  sign-windows:
+    needs: [plan, build-npm, build-desktop]
+    if: ${{ !cancelled() && !failure() && (needs.plan.outputs.cli == 'true' || needs.plan.outputs.desktop == 'true') }}
     runs-on: windows-2025
-    environment: release
+    environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: read
       id-token: write
+    env: *env
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - *checkout-release
+      - name: Download
+        uses: ./.github/release/download
         with:
-          name: desktop-unsigned-aarch64-pc-windows-msvc
-          path: ${{ runner.temp }}/apps/arm64
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: desktop-unsigned-x86_64-pc-windows-msvc
-          path: ${{ runner.temp }}/apps/x64
-
-      - name: Verify artifacts
-        run: |
-          RUNNER_TEMP=$(cygpath -u "$RUNNER_TEMP")
-          for arch in arm64 x64; do
-            (cd "$RUNNER_TEMP/apps/$arch"
-              sha256sum -c --strict --quiet SHA256SUMS
-              diff <(find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort) <(cut -c67- SHA256SUMS | LC_ALL=C sort)
-              rm SHA256SUMS)
-          done
-
-      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+          pattern: "{build-npm,build-desktop-windows-*}"
+      - name: Unpack
+        run: bash .github/release/unpack-windows.sh "$RUNNER_TEMP/in" "$RUNNER_TEMP/work"
+      - &azure-login
+        name: Log in to Azure
+        if: needs.plan.outputs.dry_run != 'true'
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - uses: azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16 # v1.2.0
+      - &azure-sign
+        name: Sign
+        if: needs.plan.outputs.dry_run != 'true'
+        uses: azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16 # v1.2.0
         with:
           endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
           signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
-          files-folder: ${{ runner.temp }}\apps
+          files-folder: ${{ runner.temp }}\work
           files-folder-filter: exe,node
           files-folder-recurse: true
           exclude-environment-credential: true
@@ -1046,446 +426,127 @@ jobs:
           exclude-azure-powershell-credential: true
           exclude-azure-developer-cli-credential: true
           exclude-interactive-browser-credential: true
-
-      - name: Verify signatures
-        shell: pwsh
-        run: |
-          Get-ChildItem "$env:RUNNER_TEMP\apps" -Recurse -Include *.exe, *.node | ForEach-Object {
-            $sig = Get-AuthenticodeSignature $_.FullName
-            if ($sig.Status -ne "Valid") { throw "Invalid signature for $($_.FullName): $($sig.Status)" }
-          }
-
-      - name: Stage artifacts
-        run: |
-          RUNNER_TEMP=$(cygpath -u "$RUNNER_TEMP")
-          for arch in arm64 x64; do
-            (cd "$RUNNER_TEMP/apps/$arch" && find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do sha256sum "$f"; done > SHA256SUMS)
-          done
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Repack
+        run: bash .github/release/repack-windows.sh "$RUNNER_TEMP/work" "$RUNNER_TEMP/out"
+      - id: upload
+        name: Upload
+        if: needs.plan.outputs.cli == 'true'
+        uses: ./.github/release/upload
         with:
-          name: desktop-signed-app-aarch64-pc-windows-msvc
-          path: ${{ runner.temp }}/apps/arm64
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          name: sign-windows
+          path: ${{ runner.temp }}/out
+      - name: Upload arm64 app
+        if: needs.plan.outputs.desktop == 'true'
+        uses: ./.github/release/upload
         with:
-          name: desktop-signed-app-x86_64-pc-windows-msvc
-          path: ${{ runner.temp }}/apps/x64
-          if-no-files-found: error
+          name: sign-desktop-windows-arm64
+          path: ${{ runner.temp }}/work/desktop-windows-arm64
+      - name: Upload x64 app
+        if: needs.plan.outputs.desktop == 'true'
+        uses: ./.github/release/upload
+        with:
+          name: sign-desktop-windows-x64
+          path: ${{ runner.temp }}/work/desktop-windows-x64
 
-  sign-desktop-windows-installer:
-    needs: [plan, package-desktop-windows]
+  sign-installer:
+    needs: [plan, build-installer]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.desktop == 'true' }}
     runs-on: windows-2025
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: read
       id-token: write
+    env: *env
     outputs:
-      digest: ${{ steps.stage.outputs.digest }}
+      digest: ${{ steps.upload.outputs.digest }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - *checkout-release
+      - name: Download
+        uses: ./.github/release/download
         with:
-          pattern: desktop-installer-unsigned-*
-          path: ${{ runner.temp }}/in
-
-      - name: Verify artifacts
-        run: |
-          RUNNER_TEMP=$(cygpath -u "$RUNNER_TEMP")
-          mkdir -p "$RUNNER_TEMP/out"
-          for arch in arm64 x64; do
-            target=$([ "$arch" = arm64 ] && echo aarch64-pc-windows-msvc || echo x86_64-pc-windows-msvc)
-            (cd "$RUNNER_TEMP/in/desktop-installer-unsigned-$target"
-              sha256sum -c --strict SHA256SUMS
-              diff <(find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort) <(cut -c67- SHA256SUMS | LC_ALL=C sort))
-            cp "$RUNNER_TEMP/in/desktop-installer-unsigned-$target/opencode-desktop-win-$arch.exe" "$RUNNER_TEMP/out/"
-          done
-
-      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
-        if: needs.plan.outputs.dry_run != 'true'
+          pattern: build-installer-*
+      - name: Unpack
+        run: mkdir -p "$RUNNER_TEMP/work" && cp "$RUNNER_TEMP"/in/build-installer-*/*.exe "$RUNNER_TEMP/work/"
+      - *azure-login
+      - *azure-sign
+      - name: Repack
+        run: bash .github/release/repack-windows.sh "$RUNNER_TEMP/work" "$RUNNER_TEMP/out"
+      - id: upload
+        name: Upload
+        uses: ./.github/release/upload
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          name: sign-installer
+          path: ${{ runner.temp }}/work
 
-      - uses: azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16 # v1.2.0
-        if: needs.plan.outputs.dry_run != 'true'
-        with:
-          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
-          files: |
-            ${{ runner.temp }}\out\opencode-desktop-win-arm64.exe
-            ${{ runner.temp }}\out\opencode-desktop-win-x64.exe
-          exclude-environment-credential: true
-          exclude-workload-identity-credential: true
-          exclude-managed-identity-credential: true
-          exclude-shared-token-cache-credential: true
-          exclude-visual-studio-credential: true
-          exclude-visual-studio-code-credential: true
-          exclude-azure-cli-credential: false
-          exclude-azure-powershell-credential: true
-          exclude-azure-developer-cli-credential: true
-          exclude-interactive-browser-credential: true
-
-      - name: Verify signatures
-        if: needs.plan.outputs.dry_run != 'true'
-        shell: pwsh
-        run: |
-          Get-ChildItem "$env:RUNNER_TEMP\out" -Filter *.exe | ForEach-Object {
-            $sig = Get-AuthenticodeSignature $_.FullName
-            if ($sig.Status -ne "Valid") { throw "Invalid signature for $($_.FullName): $($sig.Status)" }
-          }
-
-      - id: stage
-        working-directory: ${{ runner.temp }}/out
-        run: |
-          find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do sha256sum "$f"; done > SHA256SUMS
-          cat SHA256SUMS
-          echo "digest=$(sha256sum SHA256SUMS | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: desktop-windows
-          path: ${{ runner.temp }}/out
-          if-no-files-found: error
-
-  # ---------------------------------------------------------------------------
-  # Publish: environment release. No repository checkout, no repository code.
-  # Destinations, names and channels come from plan and this file, never from artifacts.
-  # ---------------------------------------------------------------------------
+  # ---- Publish: release environment; only .github/release/ is checked out -------------------------------------
+  # Destinations, names and channels come from plan and the scripts, never from artifacts.
 
   publish-npm:
-    needs: [plan, build-npm, sign-cli-macos, sign-cli-windows, attest]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.npm == 'true' }}
+    needs: [plan, sign-macos, sign-windows, sign-provenance]
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.cli == 'true' }}
     runs-on: ubuntu-24.04
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: read
       id-token: write
       attestations: read
+    env: *env
     steps:
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - *checkout-release
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24.11.0"
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - &download-signed-cli
+        name: Download
+        uses: ./.github/release/download
         with:
-          name: npm
-          path: ${{ runner.temp }}/npm
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-macos-signed
-          path: ${{ runner.temp }}/macos
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-windows-signed
-          path: ${{ runner.temp }}/windows
-
-      - name: Verify artifacts
-        env:
-          MACOS_DIGEST: ${{ needs.sign-cli-macos.outputs.digest }}
-          WINDOWS_DIGEST: ${{ needs.sign-cli-windows.outputs.digest }}
-          DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          verify() {
-            (cd "$1"
-              if [ -n "${2:-}" ] && [ "$(sha256sum SHA256SUMS | cut -d' ' -f1)" != "$2" ]; then echo "SHA256SUMS digest mismatch in $1"; exit 1; fi
-              sha256sum -c --strict --quiet SHA256SUMS
-              diff <(find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort) <(cut -c67- SHA256SUMS | LC_ALL=C sort))
-          }
-          verify "$RUNNER_TEMP/npm"
-          verify "$RUNNER_TEMP/macos" "$MACOS_DIGEST"
-          verify "$RUNNER_TEMP/windows" "$WINDOWS_DIGEST"
-          if [ "$DRY_RUN" != true ]; then
-            for f in "$RUNNER_TEMP"/npm/*.tgz; do
-              gh attestation verify "$f" --repo anomalyco/opencode --signer-workflow anomalyco/opencode/.github/workflows/publish.yml > /dev/null
-            done
-          fi
-
-      - name: Check packages
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          NODE_CLI: ${{ needs.plan.outputs.node_cli }}
-        run: |
-          targets="linux-arm64 linux-x64 linux-x64-baseline linux-arm64-musl linux-x64-musl linux-x64-baseline-musl darwin-arm64 darwin-x64 darwin-x64-baseline windows-arm64 windows-x64 windows-x64-baseline"
-          expected="@opencode/cli"
-          for t in $targets; do expected="$expected @opencode/cli-$t"; done
-          for lib in schema codemode theme ai util protocol client plugin plugin-browser core simulation server sdk ui; do expected="$expected @opencode/$lib"; done
-          if [ "$NODE_CLI" = true ]; then
-            expected="$expected @opencode/cli-node"
-            for t in linux-arm64 linux-x64 darwin-arm64 windows-arm64 windows-x64; do expected="$expected @opencode/cli-node-$t"; done
-          fi
-
-          : > "$RUNNER_TEMP/publish.tsv"
-          for f in "$RUNNER_TEMP"/macos/*.tgz "$RUNNER_TEMP"/windows/*.tgz "$RUNNER_TEMP"/npm/*.tgz; do
-            meta=$(tar -xzOf "$f" package/package.json | jq -r '[.name, .version, ((.publishConfig // {}) | keys - ["access"] | length > 0), ((.scripts // {}) | (has("preinstall") or has("install") or has("postinstall")))] | @tsv')
-            IFS=$'\t' read -r name version config install <<< "$meta"
-            if ! printf '%s\n' $expected | grep -qxF -- "$name"; then echo "Unexpected package $name in $f"; exit 1; fi
-            if [ "$version" != "$VERSION" ]; then echo "$name has version $version, expected $VERSION"; exit 1; fi
-            if [ "$config" != false ]; then echo "$name sets publishConfig beyond access"; exit 1; fi
-            if [ "$install" != false ] && [ "$name" != @opencode/cli ] && [ "$name" != @opencode/cli-node ]; then echo "$name has an install script"; exit 1; fi
-            if cut -f1 "$RUNNER_TEMP/publish.tsv" | grep -qxF -- "$name"; then echo "$name is packed twice"; exit 1; fi
-            printf '%s\t%s\n' "$name" "$f" >> "$RUNNER_TEMP/publish.tsv"
-          done
-          for name in $expected; do
-            if ! cut -f1 "$RUNNER_TEMP/publish.tsv" | grep -qxF -- "$name"; then echo "Missing package $name"; exit 1; fi
-          done
-          # The CLI wrappers resolve their platform packages, so they publish last.
-          { grep -vP '^@opencode/cli(-node)?\t' "$RUNNER_TEMP/publish.tsv" || true; grep -P '^@opencode/cli(-node)?\t' "$RUNNER_TEMP/publish.tsv"; } > "$RUNNER_TEMP/order.tsv"
-          cat "$RUNNER_TEMP/order.tsv"
-
+          pattern: "{build-npm,build-archives,sign-macos,sign-windows}"
+          digests: sign-macos=${{ needs.sign-macos.outputs.digest }} sign-windows=${{ needs.sign-windows.outputs.digest }}
       - name: Publish
+        run: bash .github/release/publish-npm.sh "$RUNNER_TEMP/in/build-npm" "$RUNNER_TEMP/in/sign-macos" "$RUNNER_TEMP/in/sign-windows"
         env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          TAG: ${{ needs.plan.outputs.npm_tag }}
-          DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-        run: |
-          # A clean directory and config, so nothing from an artifact can redirect the registry.
-          work=$(mktemp -d)
-          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/npmrc"
-          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npmrc"
-          cd "$work"
-          npm --version
-          flags=(--tag "$TAG" --access public --ignore-scripts)
-          if [ "$DRY_RUN" = true ]; then flags+=(--dry-run); else flags+=(--provenance); fi
-          while IFS=$'\t' read -r name file; do
-            if [ "$DRY_RUN" != true ] && npm view "$name@$VERSION" version > /dev/null 2>&1; then
-              echo "already published $name@$VERSION"
-              continue
-            fi
-            npm publish "$file" "${flags[@]}"
-          done < "$RUNNER_TEMP/order.tsv"
+          GH_TOKEN: ${{ github.token }}
 
-  # Uploads the standalone CLI archives to opencode.ai/files and registers them with the update server.
   publish-cli:
-    needs: [plan, build-npm, sign-cli-macos, sign-cli-windows, publish-npm]
-    if: ${{ !cancelled() && !failure() && needs.plan.outputs.npm == 'true' }}
+    needs: [plan, sign-macos, sign-windows, publish-npm]
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.cli == 'true' }}
     runs-on: ubuntu-24.04
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: read
       id-token: write
+    env: *env
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-archives
-          path: ${{ runner.temp }}/archives
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-macos-signed
-          path: ${{ runner.temp }}/macos
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-windows-signed
-          path: ${{ runner.temp }}/windows
-
-      - name: Verify artifacts
-        env:
-          MACOS_DIGEST: ${{ needs.sign-cli-macos.outputs.digest }}
-          WINDOWS_DIGEST: ${{ needs.sign-cli-windows.outputs.digest }}
-        run: |
-          verify() {
-            (cd "$1"
-              if [ -n "${2:-}" ] && [ "$(sha256sum SHA256SUMS | cut -d' ' -f1)" != "$2" ]; then echo "SHA256SUMS digest mismatch in $1"; exit 1; fi
-              sha256sum -c --strict --quiet SHA256SUMS
-              diff <(find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort) <(cut -c67- SHA256SUMS | LC_ALL=C sort))
-          }
-          verify "$RUNNER_TEMP/archives"
-          verify "$RUNNER_TEMP/macos" "$MACOS_DIGEST"
-          verify "$RUNNER_TEMP/windows" "$WINDOWS_DIGEST"
-
-      - name: Upload and register
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          CHANNEL: ${{ needs.plan.outputs.channel }}
-          NODE_CLI: ${{ needs.plan.outputs.node_cli }}
-          DRY_RUN: ${{ needs.plan.outputs.dry_run }}
+      - *checkout-release
+      - *download-signed-cli
+      - name: Publish
+        run: bash .github/release/publish-cli.sh "$RUNNER_TEMP/in/build-archives" "$RUNNER_TEMP/in/sign-macos" "$RUNNER_TEMP/in/sign-windows"
+        env: &cloudflare
           CLOUDFLARE_ACCOUNT_ID: 15d29c8639fd3733b1b5486a2acfd968
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          cli=""
-          for t in linux-arm64 linux-x64 linux-x64-baseline linux-arm64-musl linux-x64-musl linux-x64-baseline-musl; do cli="$cli $RUNNER_TEMP/archives/opencode-$t.tar.gz"; done
-          for t in darwin-arm64 darwin-x64 darwin-x64-baseline; do cli="$cli $RUNNER_TEMP/macos/opencode-$t.zip"; done
-          for t in windows-arm64 windows-x64 windows-x64-baseline; do cli="$cli $RUNNER_TEMP/windows/opencode-$t.zip"; done
-          node=""
-          if [ "$NODE_CLI" = true ]; then
-            for t in linux-arm64 linux-x64; do node="$node $RUNNER_TEMP/archives/opencode2-node-$t.tar.gz"; done
-            for t in darwin-arm64 windows-arm64 windows-x64; do node="$node $RUNNER_TEMP/archives/opencode2-node-$t.zip"; done
-          fi
 
-          # R2 accepts the API token ID as the access key and SHA-256(token) as the secret.
-          if [ "$DRY_RUN" != true ]; then
-            token_id=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/tokens/verify" | jq -er .result.id)
-            export AWS_ACCESS_KEY_ID="$token_id"
-            AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CLOUDFLARE_API_TOKEN" | sha256sum | cut -d' ' -f1)
-            export AWS_SECRET_ACCESS_KEY
-            export AWS_DEFAULT_REGION=auto AWS_REQUEST_CHECKSUM_CALCULATION=when_required AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
-          fi
-          files_json() {
-            for f in "$@"; do
-              test -s "$f"
-              name=$(basename "$f")
-              type=application/zip
-              case "$name" in *.tar.gz) type=application/gzip ;; esac
-              if [ "$DRY_RUN" = true ]; then
-                echo "dry-run upload: bin/$VERSION/$name" >&2
-              else
-                aws s3 cp "$f" "s3://opencode-production-files/bin/$VERSION/$name" --only-show-errors \
-                  --endpoint-url "https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com" \
-                  --content-type "$type" --content-disposition "attachment; filename=\"$name\"" \
-                  --cache-control "public, max-age=31536000, immutable" >&2
-              fi
-              jq -n --arg name "$name" --arg url "https://opencode.ai/files/bin/$VERSION/$name" \
-                --arg sha256 "$(sha256sum "$f" | cut -d' ' -f1)" --argjson size "$(stat -c %s "$f")" \
-                '{($name): {url: $url, sha256: $sha256, size: $size}}'
-            done | jq -s 'add'
-          }
-          publish() {
-            echo "$1" | jq .
-            if [ "$DRY_RUN" = true ]; then return; fi
-            oidc=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://update.opencode.ai" | jq -er .value)
-            for attempt in 1 2 3; do
-              status=$(curl -sS -o "$RUNNER_TEMP/response" -w '%{http_code}' -X POST https://opencode.ai/update/api/publish \
-                -H "Authorization: Bearer $oidc" -H "Content-Type: application/json" --data "$1")
-              if [ "$status" -lt 300 ]; then return; fi
-              cat "$RUNNER_TEMP/response"
-              # D1 can commit the upsert and still time out. Replaying the same artifact is safe.
-              if [ "$status" -lt 500 ] || [ "$attempt" = 3 ]; then echo "Update server returned $status"; exit 1; fi
-              sleep "$attempt"
-            done
-          }
-
-          # shellcheck disable=SC2086
-          files=$(files_json $cli)
-          publish "$(jq -n --arg c "$CHANNEL" --arg v "$VERSION" '{channel: $c, name: "cli", distribution: "npm", version: $v, metadata: {package: "@opencode/cli"}}')"
-          publish "$(jq -n --arg c "$CHANNEL" --arg v "$VERSION" --argjson files "$files" '{channel: $c, name: "cli", distribution: "opencode", version: $v, metadata: {files: $files}}')"
-          if [ -n "$node" ]; then
-            # shellcheck disable=SC2086
-            files=$(files_json $node)
-            publish "$(jq -n --arg c "$CHANNEL" --arg v "$VERSION" '{channel: $c, name: "cli-node", distribution: "npm", version: $v, metadata: {package: "@opencode/cli-node"}}')"
-            publish "$(jq -n --arg c "$CHANNEL" --arg v "$VERSION" --argjson files "$files" '{channel: $c, name: "cli-node", distribution: "opencode", version: $v, metadata: {files: $files}}')"
-          fi
-
-  # Uploads the signed desktop builds and registers the update feeds. The electron-updater metadata
-  # is computed here from the final signed files, never taken from the build.
   publish-desktop:
-    needs: [plan, build-desktop, sign-desktop-macos, sign-desktop-windows-installer]
+    needs: [plan, sign-macos, sign-installer]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.desktop == 'true' }}
     runs-on: ubuntu-24.04
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: read
       id-token: write
+    env: *env
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - *checkout-release
+      - name: Download
+        uses: ./.github/release/download
         with:
-          name: desktop-macos
-          path: ${{ runner.temp }}/macos
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: desktop-windows
-          path: ${{ runner.temp }}/windows
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: desktop-unsigned-x86_64-unknown-linux-gnu
-          path: ${{ runner.temp }}/linux-x64
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: desktop-unsigned-aarch64-unknown-linux-gnu
-          path: ${{ runner.temp }}/linux-arm64
-
-      - name: Verify artifacts
-        env:
-          MACOS_DIGEST: ${{ needs.sign-desktop-macos.outputs.digest }}
-          WINDOWS_DIGEST: ${{ needs.sign-desktop-windows-installer.outputs.digest }}
+          pattern: "{sign-macos,sign-installer,build-desktop-linux-*}"
+          digests: sign-macos=${{ needs.sign-macos.outputs.digest }} sign-installer=${{ needs.sign-installer.outputs.digest }}
+      - name: Publish
         run: |
-          verify() {
-            (cd "$1"
-              if [ -n "${2:-}" ] && [ "$(sha256sum SHA256SUMS | cut -d' ' -f1)" != "$2" ]; then echo "SHA256SUMS digest mismatch in $1"; exit 1; fi
-              sha256sum -c --strict --quiet SHA256SUMS
-              diff <(find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort) <(cut -c67- SHA256SUMS | LC_ALL=C sort))
-          }
-          verify "$RUNNER_TEMP/macos" "$MACOS_DIGEST"
-          verify "$RUNNER_TEMP/windows" "$WINDOWS_DIGEST"
-          verify "$RUNNER_TEMP/linux-x64"
-          verify "$RUNNER_TEMP/linux-arm64"
-
-      - name: Upload and register
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          CHANNEL: ${{ needs.plan.outputs.channel }}
-          DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-          CLOUDFLARE_ACCOUNT_ID: 15d29c8639fd3733b1b5486a2acfd968
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          d="$RUNNER_TEMP"
-          win="$d/windows/opencode-desktop-win-arm64.exe $d/windows/opencode-desktop-win-x64.exe"
-          mac="$d/macos/opencode-desktop-mac-arm64.zip $d/macos/opencode-desktop-mac-arm64.dmg $d/macos/opencode-desktop-mac-x64.zip $d/macos/opencode-desktop-mac-x64.dmg"
-          linux="$d/linux-x64/opencode-desktop-linux-x86_64.AppImage $d/linux-x64/opencode-desktop-linux-amd64.deb $d/linux-x64/opencode-desktop-linux-x86_64.rpm"
-          linux_arm64="$d/linux-arm64/opencode-desktop-linux-arm64.AppImage $d/linux-arm64/opencode-desktop-linux-arm64.deb $d/linux-arm64/opencode-desktop-linux-aarch64.rpm"
-          bundles="$d/macos/opencode-desktop-mac-arm64.app.tar.gz $d/macos/opencode-desktop-mac-x64.app.tar.gz"
-
-          if [ "$DRY_RUN" != true ]; then
-            token_id=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/tokens/verify" | jq -er .result.id)
-            export AWS_ACCESS_KEY_ID="$token_id"
-            AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CLOUDFLARE_API_TOKEN" | sha256sum | cut -d' ' -f1)
-            export AWS_SECRET_ACCESS_KEY
-            export AWS_DEFAULT_REGION=auto AWS_REQUEST_CHECKSUM_CALCULATION=when_required AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
-          fi
-          url() { echo "https://opencode.ai/files/bin/$VERSION/$(basename "$1")"; }
-          files="{}"
-          # shellcheck disable=SC2086
-          for f in $win $mac $linux $linux_arm64 $bundles; do
-            test -s "$f"
-            name=$(basename "$f")
-            if [ "$DRY_RUN" = true ]; then
-              echo "dry-run upload: bin/$VERSION/$name"
-            else
-              aws s3 cp "$f" "s3://opencode-production-files/bin/$VERSION/$name" --only-show-errors \
-                --endpoint-url "https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com" \
-                --content-type application/octet-stream --content-disposition "attachment; filename=\"$name\"" \
-                --cache-control "public, max-age=31536000, immutable"
-            fi
-            files=$(jq --arg name "$name" --arg url "$(url "$f")" --arg sha256 "$(sha256sum "$f" | cut -d' ' -f1)" \
-              --argjson size "$(stat -c %s "$f")" '. + {($name): {url: $url, sha256: $sha256, size: $size}}' <<< "$files")
-          done
-          manifest() {
-            for f in "$@"; do
-              jq -n --arg url "$(url "$f")" --arg sha512 "$(openssl dgst -sha512 -binary "$f" | base64 -w0)" \
-                --argjson size "$(stat -c %s "$f")" '{url: $url, sha512: $sha512, size: $size}'
-            done | jq -s --arg date "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" '{files: ., releaseDate: $date}'
-          }
-          # shellcheck disable=SC2086
-          manifests=$(jq -n \
-            --argjson win "$(manifest $win)" \
-            --argjson mac "$(manifest $mac)" \
-            --argjson linux "$(manifest $linux)" \
-            --argjson linux_arm64 "$(manifest $linux_arm64)" \
-            '{"desktop.yml": $win, "desktop-mac.yml": $mac, "desktop-linux.yml": $linux, "desktop-linux-arm64.yml": $linux_arm64}')
-          artifact=$(jq -n --arg c "$CHANNEL" --arg v "$VERSION" --argjson files "$files" --argjson manifests "$manifests" \
-            '{channel: $c, name: "desktop", distribution: "opencode", version: $v, metadata: {files: $files, manifests: $manifests}}')
-          echo "$artifact" | jq .
-          if [ "$DRY_RUN" = true ]; then exit 0; fi
-
-          oidc=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://update.opencode.ai" | jq -er .value)
-          for attempt in 1 2 3; do
-            status=$(curl -sS -o "$RUNNER_TEMP/response" -w '%{http_code}' -X POST https://opencode.ai/update/api/publish \
-              -H "Authorization: Bearer $oidc" -H "Content-Type: application/json" --data "$artifact")
-            if [ "$status" -lt 300 ]; then exit 0; fi
-            cat "$RUNNER_TEMP/response"
-            if [ "$status" -lt 500 ] || [ "$attempt" = 3 ]; then echo "Update server returned $status"; exit 1; fi
-            sleep "$attempt"
-          done
+          bash .github/release/publish-desktop.sh "$RUNNER_TEMP/in/sign-macos" "$RUNNER_TEMP/in/sign-installer" \
+            "$RUNNER_TEMP/in/build-desktop-linux-x64" "$RUNNER_TEMP/in/build-desktop-linux-arm64"
+        env: *cloudflare
 
   publish-docker:
     needs: [plan, build-docker]
@@ -1495,419 +556,121 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env: *env
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - *checkout-release
+      - name: Download
+        uses: ./.github/release/download
         with:
-          name: docker-image
-          path: ${{ runner.temp }}/image
-
-      - name: Push
-        working-directory: ${{ runner.temp }}/image
+          pattern: build-docker
+      - name: Publish
+        run: bash .github/release/publish-docker.sh "$RUNNER_TEMP/in/build-docker"
         env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-          ACTOR: ${{ github.actor }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          sha256sum -c --strict SHA256SUMS
-          skopeo inspect --raw oci-archive:opencode-image.tar | jq .
-          if [ "$DRY_RUN" = true ]; then exit 0; fi
-          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$ACTOR" --password-stdin
-          skopeo copy --all oci-archive:opencode-image.tar "docker://ghcr.io/anomalyco/opencode:$VERSION"
 
   publish-homebrew:
-    needs: [plan, build-npm, sign-cli-macos, publish-cli]
+    needs: [plan, sign-macos, sign-windows, publish-cli]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: read
       id-token: write
+    env: *env
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-archives
-          path: ${{ runner.temp }}/archives
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cli-macos-signed
-          path: ${{ runner.temp }}/macos
-
-      - name: Verify artifacts
-        env:
-          MACOS_DIGEST: ${{ needs.sign-cli-macos.outputs.digest }}
-        run: |
-          verify() {
-            (cd "$1"
-              if [ -n "${2:-}" ] && [ "$(sha256sum SHA256SUMS | cut -d' ' -f1)" != "$2" ]; then echo "SHA256SUMS digest mismatch in $1"; exit 1; fi
-              sha256sum -c --strict --quiet SHA256SUMS
-              diff <(find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort) <(cut -c67- SHA256SUMS | LC_ALL=C sort))
-          }
-          verify "$RUNNER_TEMP/archives"
-          verify "$RUNNER_TEMP/macos" "$MACOS_DIGEST"
-
-      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+      - *checkout-release
+      - *download-signed-cli
+      - id: token
+        name: Create token
         if: needs.plan.outputs.dry_run != 'true'
-        id: token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           app-id: ${{ vars.OPENCODE_APP_ID }}
           private-key: ${{ secrets.OPENCODE_APP_SECRET }}
           owner: anomalyco
           repositories: homebrew-tap
-
-      - name: Update formula
+      - name: Publish
+        run: bash .github/release/publish-homebrew.sh "$RUNNER_TEMP/in/sign-macos" "$RUNNER_TEMP/in/build-archives"
         env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          CHANNEL: ${{ needs.plan.outputs.channel }}
-          DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-          TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          sum() { sha256sum "$1" | cut -d' ' -f1; }
-          base="https://opencode.ai/files/bin/$VERSION"
-          tap="$RUNNER_TEMP/tap"
-          if [ "$DRY_RUN" = true ]; then
-            mkdir -p "$tap"
-          else
-            git clone -q "https://x-access-token:$TOKEN@github.com/anomalyco/homebrew-tap.git" "$tap"
-          fi
-          cat > "$tap/opencode-v2.rb" <<EOF
-          # typed: false
-          # frozen_string_literal: true
-
-          class OpencodeV2 < Formula
-            desc "OpenCode V2 - the AI coding agent for the terminal"
-            homepage "https://github.com/anomalyco/opencode"
-            version "$VERSION"
-            license "MIT"
-
-            depends_on "ripgrep"
-            conflicts_with "opencode", because: "both install an opencode binary"
-
-            on_macos do
-              if Hardware::CPU.arm?
-                url "$base/opencode-darwin-arm64.zip"
-                sha256 "$(sum "$RUNNER_TEMP/macos/opencode-darwin-arm64.zip")"
-              else
-                url "$base/opencode-darwin-x64-baseline.zip"
-                sha256 "$(sum "$RUNNER_TEMP/macos/opencode-darwin-x64-baseline.zip")"
-              end
-            end
-
-            on_linux do
-              if Hardware::CPU.arm?
-                url "$base/opencode-linux-arm64.tar.gz"
-                sha256 "$(sum "$RUNNER_TEMP/archives/opencode-linux-arm64.tar.gz")"
-              else
-                url "$base/opencode-linux-x64-baseline.tar.gz"
-                sha256 "$(sum "$RUNNER_TEMP/archives/opencode-linux-x64-baseline.tar.gz")"
-              end
-            end
-
-            def install
-              bin.install "opencode"
-            end
-          end
-          EOF
-          cat "$tap/opencode-v2.rb"
-          if [ "$DRY_RUN" = true ]; then exit 0; fi
-
-          cd "$tap"
-          git add opencode-v2.rb
-          if ! git diff --cached --quiet; then
-            git -c user.name="opencode-agent[bot]" -c user.email="opencode-agent[bot]@users.noreply.github.com" \
-              commit -q -m "chore: update opencode-v2 to $VERSION"
-            git push -q origin HEAD:master
-          fi
-          oidc=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://update.opencode.ai" | jq -er .value)
-          curl -fsS -X POST https://opencode.ai/update/api/publish -H "Authorization: Bearer $oidc" -H "Content-Type: application/json" \
-            --data "$(jq -n --arg c "$CHANNEL" --arg v "$VERSION" '{channel: $c, name: "cli", distribution: "homebrew", version: $v, metadata: {package: "anomalyco/tap/opencode-v2"}}')"
+          HOMEBREW_TOKEN: ${{ steps.token.outputs.token }}
 
   # The AUR package installs the published npm tarballs, so it follows the npm publish.
   publish-aur:
-    needs: [plan, build-npm, publish-npm]
+    needs: [plan, sign-macos, sign-windows, publish-npm]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: read
       id-token: write
+    env: *env
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: npm
-          path: ${{ runner.temp }}/npm
-
-      - name: Verify artifact
-        working-directory: ${{ runner.temp }}/npm
-        run: |
-          sha256sum -c --strict --quiet SHA256SUMS
-          diff <(find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort) <(cut -c67- SHA256SUMS | LC_ALL=C sort)
-
-      - name: Update package
+      - *checkout-release
+      - *download-signed-cli
+      - name: Publish
+        run: bash .github/release/publish-aur.sh "$RUNNER_TEMP/in/build-npm"
         env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          CHANNEL: ${{ needs.plan.outputs.channel }}
-          DRY_RUN: ${{ needs.plan.outputs.dry_run }}
           AUR_KEY: ${{ secrets.AUR_KEY }}
-        run: |
-          name=opencode-beta
-          pkgver="${VERSION//-/.}"
-          repo="$RUNNER_TEMP/aur"
-          if [ "$DRY_RUN" = true ]; then
-            mkdir -p "$repo"
-            printf 'MIT License\n' > "$repo/LICENSE"
-          else
-            mkdir -p ~/.ssh
-            printf '%s\n' "$AUR_KEY" > ~/.ssh/aur
-            chmod 600 ~/.ssh/aur
-            echo "aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN" > ~/.ssh/known_hosts
-            export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
-            git clone -q "ssh://aur@aur.archlinux.org/$name.git" "$repo"
-          fi
-          cd "$repo"
-          test -s LICENSE
-          printf '#!/bin/sh\nexec "$(dirname "$0")/opencode" "$@"\n' > opencode2
-          sum() { sha256sum "$1" | cut -d' ' -f1; }
-          x64="$RUNNER_TEMP/npm/opencode-cli-linux-x64-baseline-$VERSION.tgz"
-          arm64="$RUNNER_TEMP/npm/opencode-cli-linux-arm64-$VERSION.tgz"
-          x64_url="https://registry.npmjs.org/@opencode/cli-linux-x64-baseline/-/cli-linux-x64-baseline-$VERSION.tgz"
-          arm64_url="https://registry.npmjs.org/@opencode/cli-linux-arm64/-/cli-linux-arm64-$VERSION.tgz"
 
-          # Stripping a compiled Bun executable can damage its embedded application.
-          cat > PKGBUILD <<EOF
-          # Maintainer: Dax <mail@thdxr.com>
-          pkgname=$name
-          pkgver=$pkgver
-          pkgrel=1
-          pkgdesc='OpenCode beta - the AI coding agent for the terminal'
-          url='https://github.com/anomalyco/opencode'
-          arch=('x86_64' 'aarch64')
-          license=('MIT')
-          depends=('glibc' 'gcc-libs' 'ripgrep')
-          provides=('opencode' 'opencode2')
-          conflicts=('opencode' 'opencode2')
-          options=('!strip' '!debug')
-          source=('LICENSE' 'opencode2')
-          sha256sums=('$(sum LICENSE)' '$(sum opencode2)')
-          source_x86_64=('$name-$pkgver-x86_64.tgz::$x64_url')
-          sha256sums_x86_64=('$(sum "$x64")')
-          source_aarch64=('$name-$pkgver-aarch64.tgz::$arm64_url')
-          sha256sums_aarch64=('$(sum "$arm64")')
-
-          package() {
-            install -Dm755 "\$srcdir/package/bin/opencode" "\$pkgdir/usr/bin/opencode"
-            install -Dm755 "\$srcdir/opencode2" "\$pkgdir/usr/bin/opencode2"
-            install -Dm644 "\$srcdir/LICENSE" "\$pkgdir/usr/share/licenses/\$pkgname/LICENSE"
-          }
-          EOF
-          cat > .SRCINFO <<EOF
-          pkgbase = $name
-          	pkgdesc = OpenCode beta - the AI coding agent for the terminal
-          	pkgver = $pkgver
-          	pkgrel = 1
-          	url = https://github.com/anomalyco/opencode
-          	arch = x86_64
-          	arch = aarch64
-          	license = MIT
-          	depends = glibc
-          	depends = gcc-libs
-          	depends = ripgrep
-          	provides = opencode
-          	provides = opencode2
-          	conflicts = opencode
-          	conflicts = opencode2
-          	options = !strip
-          	options = !debug
-          	source = LICENSE
-          	source = opencode2
-          	sha256sums = $(sum LICENSE)
-          	sha256sums = $(sum opencode2)
-          	source_x86_64 = $name-$pkgver-x86_64.tgz::$x64_url
-          	sha256sums_x86_64 = $(sum "$x64")
-          	source_aarch64 = $name-$pkgver-aarch64.tgz::$arm64_url
-          	sha256sums_aarch64 = $(sum "$arm64")
-
-          pkgname = $name
-          EOF
-          cat PKGBUILD .SRCINFO
-          if [ "$DRY_RUN" = true ]; then exit 0; fi
-
-          git add PKGBUILD .SRCINFO LICENSE opencode2
-          if ! git diff --cached --quiet; then
-            git -c user.name=opencode -c user.email=opencode@sst.dev commit -q -m "chore: update $name to $pkgver"
-            git push -q origin HEAD:master
-          fi
-          oidc=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://update.opencode.ai" | jq -er .value)
-          curl -fsS -X POST https://opencode.ai/update/api/publish -H "Authorization: Bearer $oidc" -H "Content-Type: application/json" \
-            --data "$(jq -n --arg c "$CHANNEL" --arg v "$VERSION" --arg p "$name" '{channel: $c, name: "cli", distribution: "aur", version: $v, metadata: {package: $p}}')"
-
-  # WinGet manifests as data. Submission to microsoft/winget-pkgs stays paused until the packages are
-  # accepted; the manifests are attached to the run so they can be submitted by hand.
-  winget-manifests:
-    needs: [plan, sign-cli-windows, sign-desktop-windows-installer]
+  # WinGet manifests as data. Submission to microsoft/winget-pkgs stays paused until the packages are accepted.
+  publish-winget:
+    needs: [plan, sign-windows, sign-installer]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
-    permissions: {}
+    env: *env
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - *checkout-release
+      - name: Download
+        uses: ./.github/release/download
         with:
-          name: cli-windows-signed
-          path: ${{ runner.temp }}/cli
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+          pattern: "{sign-windows,sign-installer}"
+          digests: sign-windows=${{ needs.sign-windows.outputs.digest }} sign-installer=${{ needs.sign-installer.outputs.digest }}
+      - name: Render
+        run: bash .github/release/render-winget.sh "$RUNNER_TEMP/in/sign-windows" "$RUNNER_TEMP/in/sign-installer" "$RUNNER_TEMP/out"
+      - name: Upload
+        uses: ./.github/release/upload
         with:
-          name: desktop-windows
-          path: ${{ runner.temp }}/desktop
-
-      - name: Write manifests
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          CLI_DIGEST: ${{ needs.sign-cli-windows.outputs.digest }}
-          DESKTOP_DIGEST: ${{ needs.sign-desktop-windows-installer.outputs.digest }}
-        run: |
-          [ "$(sha256sum "$RUNNER_TEMP/cli/SHA256SUMS" | cut -d' ' -f1)" = "$CLI_DIGEST" ]
-          [ "$(sha256sum "$RUNNER_TEMP/desktop/SHA256SUMS" | cut -d' ' -f1)" = "$DESKTOP_DIGEST" ]
-          (cd "$RUNNER_TEMP/cli" && sha256sum -c --strict --quiet SHA256SUMS)
-          (cd "$RUNNER_TEMP/desktop" && sha256sum -c --strict --quiet SHA256SUMS)
-          sum() { sha256sum "$1" | cut -d' ' -f1 | tr a-f A-F; }
-          base="https://opencode.ai/files/bin/$VERSION"
-          date=$(date -u +%F)
-          out="$RUNNER_TEMP/winget"
-          header() {
-            printf '# yaml-language-server: $schema=https://aka.ms/winget-manifest.%s.1.12.0.schema.json\n\nPackageIdentifier: %s\nPackageVersion: %s\n' "$2" "$1" "$VERSION"
-          }
-          footer() { printf 'ManifestType: %s\nManifestVersion: 1.12.0\n' "$1"; }
-          locale() {
-            header "$1" defaultLocale
-            printf '%s\n' "PackageLocale: en-US" "Publisher: OpenCode" "PublisherUrl: https://anoma.ly/" \
-              "PublisherSupportUrl: https://github.com/anomalyco/opencode/issues" "PrivacyUrl: https://opencode.ai/legal/privacy-policy" \
-              "PackageName: $2" "PackageUrl: https://opencode.ai/" "License: MIT" "LicenseUrl: https://github.com/anomalyco/opencode/blob/HEAD/LICENSE" \
-              "ShortDescription: $3" "Moniker: $4" "Tags:" "- ai" "- coding-agent" "- developer-tools" \
-              "Documentations:" "- DocumentLabel: Docs" "  DocumentUrl: https://opencode.ai/v2/docs"
-            footer defaultLocale
-          }
-
-          id=Anomaly.OpenCode
-          mkdir -p "$out/$id"
-          { header $id version; echo "DefaultLocale: en-US"; footer version; } > "$out/$id/$id.yaml"
-          {
-            header $id installer
-            printf '%s\n' "InstallerType: zip" "NestedInstallerType: portable" "NestedInstallerFiles:" \
-              "- RelativeFilePath: opencode.exe" "  PortableCommandAlias: opencode" "Commands:" "- opencode" "ReleaseDate: $date" "Installers:" \
-              "- Architecture: x64" "  InstallerUrl: $base/opencode-windows-x64-baseline.zip" "  InstallerSha256: $(sum "$RUNNER_TEMP/cli/opencode-windows-x64-baseline.zip")" \
-              "- Architecture: arm64" "  InstallerUrl: $base/opencode-windows-arm64.zip" "  InstallerSha256: $(sum "$RUNNER_TEMP/cli/opencode-windows-arm64.zip")"
-            footer installer
-          } > "$out/$id/$id.installer.yaml"
-          locale $id "OpenCode CLI" "The open source AI coding agent for the terminal." opencode > "$out/$id/$id.locale.en-US.yaml"
-
-          # The display name and uninstall key match what the NSIS installer registers for ai.opencode.desktop.
-          id=Anomaly.OpenCode.Desktop
-          mkdir -p "$out/$id"
-          { header $id version; echo "DefaultLocale: en-US"; footer version; } > "$out/$id/$id.yaml"
-          {
-            header $id installer
-            printf '%s\n' "InstallerType: nullsoft" "Scope: user" "UpgradeBehavior: install" "ProductCode: d074f30d-5f88-5885-b075-be1348cc7676" \
-              "Protocols:" "- opencode" "ReleaseDate: $date" "Installers:" \
-              "- Architecture: x64" "  InstallerUrl: $base/opencode-desktop-win-x64.exe" "  InstallerSha256: $(sum "$RUNNER_TEMP/desktop/opencode-desktop-win-x64.exe")" \
-              "- Architecture: arm64" "  InstallerUrl: $base/opencode-desktop-win-arm64.exe" "  InstallerSha256: $(sum "$RUNNER_TEMP/desktop/opencode-desktop-win-arm64.exe")"
-            footer installer
-          } > "$out/$id/$id.installer.yaml"
-          locale $id "OpenCode" "The open source AI coding agent as a desktop app." opencode-desktop > "$out/$id/$id.locale.en-US.yaml"
-          tail -n +1 "$out"/*/*
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: winget-manifests
-          path: ${{ runner.temp }}/winget
-          if-no-files-found: error
+          name: publish-winget
+          path: ${{ runner.temp }}/out
 
   publish-github-release:
-    needs:
-      [
-        plan,
-        build-npm,
-        sign-cli-macos,
-        sign-cli-windows,
-        sign-desktop-macos,
-        sign-desktop-windows-installer,
-        publish-cli,
-        publish-desktop,
-      ]
+    needs: [plan, sign-macos, sign-windows, sign-installer, publish-cli, publish-desktop]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: write
+    env: *env
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - *checkout-release
+      - name: Download
+        uses: ./.github/release/download
         with:
-          pattern: "{cli-archives,cli-macos-signed,cli-windows-signed,desktop-macos,desktop-windows,desktop-unsigned-*-linux-gnu}"
-          path: ${{ runner.temp }}/in
-
-      - name: Verify artifacts
-        env:
-          CLI_MACOS: ${{ needs.sign-cli-macos.outputs.digest }}
-          CLI_WINDOWS: ${{ needs.sign-cli-windows.outputs.digest }}
-          DESKTOP_MACOS: ${{ needs.sign-desktop-macos.outputs.digest }}
-          DESKTOP_WINDOWS: ${{ needs.sign-desktop-windows-installer.outputs.digest }}
-        run: |
-          check() { [ "$(sha256sum "$RUNNER_TEMP/in/$1/SHA256SUMS" | cut -d' ' -f1)" = "$2" ] || { echo "SHA256SUMS digest mismatch in $1"; exit 1; }; }
-          check cli-macos-signed "$CLI_MACOS"
-          check cli-windows-signed "$CLI_WINDOWS"
-          check desktop-macos "$DESKTOP_MACOS"
-          check desktop-windows "$DESKTOP_WINDOWS"
-          mkdir -p "$RUNNER_TEMP/assets"
-          for dir in "$RUNNER_TEMP"/in/*; do
-            (cd "$dir"
-              sha256sum -c --strict --quiet SHA256SUMS
-              diff <(find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort) <(cut -c67- SHA256SUMS | LC_ALL=C sort))
-            find "$dir" -maxdepth 1 -type f \( -name 'opencode-*.zip' -o -name 'opencode-*.tar.gz' -o -name 'opencode-desktop-*' \) ! -name '*.tgz' -exec cp {} "$RUNNER_TEMP/assets/" \;
-          done
-          cd "$RUNNER_TEMP/assets"
-          sha256sum -- * > SHA256SUMS
-          cat SHA256SUMS
-
-      # Immutable releases lock assets once published, so upload to a draft first.
-      - name: Create release
+          pattern: "{build-archives,build-desktop-linux-*,sign-macos,sign-windows,sign-installer}"
+          digests: >-
+            sign-macos=${{ needs.sign-macos.outputs.digest }} sign-windows=${{ needs.sign-windows.outputs.digest }}
+            sign-installer=${{ needs.sign-installer.outputs.digest }}
+      - name: Publish
+        run: bash .github/release/publish-github-release.sh "$RUNNER_TEMP"/in/*
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.plan.outputs.version }}
-          NOTES: ${{ inputs.release_notes }}
-          DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-        run: |
-          tag="v$VERSION"
-          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
-          if [ "$DRY_RUN" = true ]; then
-            ls -la "$RUNNER_TEMP/assets"
-            exit 0
-          fi
-          if ! gh release view "$tag" > /dev/null 2>&1; then
-            gh release create "$tag" --draft --verify-tag --title "$tag" --notes-file "$RUNNER_TEMP/notes.md"
-          fi
-          gh release upload "$tag" "$RUNNER_TEMP"/assets/* --clobber
-          gh release edit "$tag" --draft=false
+          OPENCODE_RELEASE_NOTES: ${{ inputs.release_notes }}
 
   # Brings the release commit back to dev. Pushing to dev is blocked by rulesets, so it opens a PR.
-  release-pr:
-    needs: [plan, source, publish-npm, publish-cli, publish-desktop, publish-github-release]
+  publish-pr:
+    needs: [plan, commit, publish-npm, publish-cli, publish-desktop, publish-github-release]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.channel == 'latest' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       pull-requests: write
+    env: *env
     steps:
-      - name: Open pull request
+      - *checkout-release
+      - name: Publish
+        run: bash .github/release/publish-pr.sh "$SHA"
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.plan.outputs.version }}
-          SHA: ${{ needs.source.outputs.sha }}
-        run: |
-          branch="release-v$VERSION"
-          gh api "repos/$GH_REPO/git/refs" -f "ref=refs/heads/$branch" -f "sha=$SHA" > /dev/null || gh api "repos/$GH_REPO/git/refs/heads/$branch" > /dev/null
-          body="Brings the versions and changelog of the published \`v$VERSION\` release back to \`dev\`. The \`v$VERSION\` tag points at this commit."
-          if ! gh pr create --base dev --head "$branch" --title "release: v$VERSION" --body "$body"; then
-            echo "::warning::Could not open the release PR. Open it by hand: gh pr create --base dev --head $branch"
-          fi
+          SHA: ${{ needs.commit.outputs.sha }}
