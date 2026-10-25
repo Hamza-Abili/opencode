@@ -136,6 +136,8 @@ export function createSidebarPeek(input: {
   let keyboard = false
   // Whether the sidebar last docked from a peek, which already shows it.
   let handedOff = false
+  // Called by its toggle rather than the pointer, the peek stays until Escape, a press outside it, or the toggle again.
+  let summoned = false
   let viewport = window.innerWidth
   // Where the edge zone starts, and the box spanning the toggle and the sidebar, until the layout next changes.
   let edgeTop: number | undefined
@@ -200,6 +202,7 @@ export function createSidebarPeek(input: {
     motion.snap(0)
     toggle = undefined
     corridor = undefined
+    summoned = false
 
     if (!shown()) return
     setShown(false)
@@ -210,6 +213,7 @@ export function createSidebarPeek(input: {
     cancelClose()
 
     if (!shown() || input.open()) return
+    summoned = false
     clearInterval(watch)
     watch = undefined
     const aside = input.aside()
@@ -301,6 +305,8 @@ export function createSidebarPeek(input: {
 
   function check() {
     if (!shown() || input.open() || !watch) return
+
+    if (summoned) return cancelClose()
 
     if ((pointer && inside(pointer)) || held()) return cancelClose()
     closing ??= setTimeout(() => {
@@ -396,6 +402,11 @@ export function createSidebarPeek(input: {
         keyboard = false
         pressed = event.pointerType !== "touch"
         cancelOpen()
+
+        if (!summoned || !(event.target instanceof Element)) return
+
+        if (input.aside()?.contains(event.target) || event.target.closest(`${toggles}, ${menus}`)) return
+        hide()
       },
       { passive: true, capture: true },
     )
@@ -419,7 +430,8 @@ export function createSidebarPeek(input: {
     })
     makeEventListener(window, "blur", () => {
       pressed = false
-      hide()
+
+      if (!summoned) hide()
     })
 
     const aside = input.aside()
@@ -491,5 +503,11 @@ export function createSidebarPeek(input: {
     shown,
     /** Whether the sidebar last docked from a peek, which already shows it. */
     handedOff: () => handedOff,
+    /** Floats the closed sidebar until Escape, a press outside it or the next toggle, or closes it if it was called. */
+    toggle() {
+      if (summoned && motion.target === 100) return hide(true)
+      summoned = true
+      show()
+    },
   }
 }

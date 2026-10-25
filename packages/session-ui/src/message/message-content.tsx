@@ -13,7 +13,7 @@ import {
   type JSX,
 } from "solid-js"
 import { createStore } from "solid-js/store"
-import { createMediaQuery } from "@solid-primitives/media"
+import { isMobileLayout } from "@opencode/ui/mobile-layout"
 import { useData } from "../context"
 import { useDialog } from "@opencode/ui/context/dialog"
 import { useI18n } from "@opencode/ui/context/i18n"
@@ -341,7 +341,7 @@ export function CurrentUserMessageDisplay(props: {
   const fulltimefmt = createMemo(() => new Intl.DateTimeFormat(i18n.locale(), { dateStyle: "full", timeStyle: "long" }))
 
   // Mobile shows the current agent and model in the composer and switch notices, so repeating them per message is noise.
-  const mobile = createMediaQuery("(max-width: 767px)")
+  const mobile = isMobileLayout
 
   const metaLabels = createMemo(() => {
     const agent = props.agent
@@ -947,7 +947,7 @@ export function AssistantTextContent(props: {
   })
 
   // Mobile omits the per-response agent and model; see CurrentUserMessageDisplay.
-  const mobile = createMediaQuery("(max-width: 767px)")
+  const mobile = isMobileLayout
 
   const meta = createMemo(() => {
     const agent = props.message.agent

@@ -27,12 +27,14 @@ story.describe("message timestamp", () => {
     await expect(tooltip).toBeVisible()
 
     await page.evaluate(() => document.fonts.ready.then(() => undefined))
+
     for (const width of [1000, 390]) {
       await page.setViewportSize({ width, height: 844 })
       const bubble = await timeline.locator('[data-slot="user-message-text"]').boundingBox()
       const time = await timestamp.boundingBox()
       const footer = await timeline.locator('[data-slot="user-message-copy-wrapper"]').boundingBox()
       const message = await timeline.locator('[data-component="user-message"]').boundingBox()
+
       if (!bubble || !time || !footer || !message) throw new Error("Message geometry is unavailable")
       expect(Math.abs(bubble.x + bubble.width - message.x - message.width)).toBeLessThan(1)
       expect(footer.y).toBeGreaterThanOrEqual(bubble.y + bubble.height)
@@ -61,14 +63,17 @@ story("drops a pending footer at once on delivery with and without hover", async
     await expect(footer).toHaveCSS("opacity", "1")
     await expect(pending).toHaveCSS("opacity", "1")
     const before = await pending.boundingBox()
+
     if (!before) throw new Error("Pending footer geometry is unavailable")
 
     if (hover) await message.hover()
+
     if (!hover) await page.mouse.move(0, 0)
     // Pending stands in for the unsent time, so the actions follow the labels without a gap held for it.
     await expect(timestamp).toBeHidden()
     const label = await timeline.locator('[data-slot="user-message-meta-item"]').last().boundingBox()
     const actions = await timeline.locator('[data-slot="user-message-actions"]').boundingBox()
+
     if (!label || !actions) throw new Error("Pending footer geometry is unavailable")
     expect(actions.x - label.x - label.width).toBeLessThanOrEqual(9)
     await timeline.getByLabel("Delivery state").selectOption("delivered")
@@ -78,6 +83,7 @@ story("drops a pending footer at once on delivery with and without hover", async
       const pending = element.querySelector(
         '[data-slot="user-message-transition"]:has([data-slot="user-message-pending"])',
       )!
+
       const footer = element.querySelector('[data-slot="user-message-copy-wrapper"]')!
 
       return {
@@ -105,7 +111,7 @@ story("drops a pending footer at once on delivery with and without hover", async
   await expect(footer).toHaveCSS("opacity", "0")
 })
 
-story("marks pending metadata without badging delivered, starting, or queued prompts", async ({ mount, page }) => {
+story("marks pending metadata without badging delivered, starting, or queued prompts", async ({ mount }) => {
   const timeline = await mount("current-prompt-message--pending")
   const indicator = timeline.locator('[data-slot="user-message-meta"] [data-slot="user-message-pending"]')
   const text = timeline.locator('[data-slot="user-message-text"]')
@@ -113,7 +119,9 @@ story("marks pending metadata without badging delivered, starting, or queued pro
   for (const status of ["steering", "stranded", "starting", "queued", "delivered"]) {
     await timeline.getByLabel("Delivery state").selectOption(status)
     const pending = status === "steering" || status === "stranded"
+
     if (pending) await expect(indicator).toBeVisible()
+
     if (!pending) await expect(indicator).toBeHidden()
 
     const colors = await timeline.evaluate((element, pending) => {
@@ -153,6 +161,7 @@ story("marks pending metadata without badging delivered, starting, or queued pro
 
   const icon = await indicator.locator("svg").boundingBox()
   const label = await timeline.locator('[data-slot="user-message-meta"]').boundingBox()
+
   if (!icon || !label) throw new Error("Pending metadata geometry is unavailable")
   expect(Math.abs(icon.y + icon.height / 2 - label.y - label.height / 2)).toBeLessThan(0.5)
 
@@ -180,14 +189,22 @@ story("marks pending metadata without badging delivered, starting, or queued pro
   ).toBeVisible()
   await expect(timeline.getByRole("img", { name: "Pending", exact: true })).toHaveCount(0)
   await timeline.getByLabel("Grouped prompts", { exact: true }).uncheck()
-  await page.setViewportSize({ width: 390, height: 844 })
-  await expect(indicator).toBeVisible()
-  await expect(timeline.locator('[data-slot="user-message-meta-item"]')).toHaveCount(0)
   await timeline.getByLabel("Prompt text", { exact: true }).uncheck()
   await expect(timeline.getByText("notes.json", { exact: true })).toBeVisible()
   await expect(indicator).toBeVisible()
   await timeline.getByRole("button", { name: "Move to queue", exact: true }).click()
   await expect(indicator).toBeHidden()
+})
+
+story.describe("touch", () => {
+  story.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } })
+
+  story("leaves a pending prompt's agent and model to the composer", async ({ mount }) => {
+    const timeline = await mount("current-prompt-message--pending")
+    await timeline.getByLabel("Delivery state").selectOption("steering")
+    await expect(timeline.locator('[data-slot="user-message-meta"] [data-slot="user-message-pending"]')).toBeVisible()
+    await expect(timeline.locator('[data-slot="user-message-meta-item"]')).toHaveCount(0)
+  })
 })
 
 // Moved from packages/app/e2e/regression/session-timeline-collapse-state.spec.ts

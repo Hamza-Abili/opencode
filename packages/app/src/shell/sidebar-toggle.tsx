@@ -1,5 +1,5 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
-import { createMediaQuery } from "@solid-primitives/media"
+import { isMobileLayout } from "@opencode/ui/mobile-layout"
 import { Icon } from "@opencode/ui/icon"
 import { IconButton } from "@opencode/ui/icon-button"
 import { Keybind } from "@opencode/ui/keybind"
@@ -10,6 +10,7 @@ import { usePlatform } from "@/runtime/platform/platform"
 import { useSettings } from "@/settings/model"
 import { motionTuning } from "@opencode/ui/motion-tuning"
 import { sidebarPeekEnabled, sidebarUnread } from "@/shell/sidebar-peek"
+import { sidebarAutoHidden } from "@/shell/room"
 
 // Whether the closed sidebar peeks, which the toggle's unread dot and tooltip follow.
 const [peek, setPeek] = createSignal(sidebarPeekEnabled())
@@ -69,18 +70,21 @@ export function SidebarToggle(props: { handoff?: "out" | "in" }) {
   const language = useLanguage()
   const settings = useSettings()
   const keybind = () => command.keybindParts("sidebar.toggle")
+  const docked = () => settings.appearance.sidebarOpen() && !sidebarAutoHidden()
   const side = props.handoff
   let full: SVGSVGElement | undefined
   let outline: HTMLSpanElement | undefined
-  const unread = () => peek() && !settings.appearance.sidebarOpen() && sidebarUnread()
+  const unread = () => peek() && !docked() && sidebarUnread()
+
   const ref =
-    side === "out"
-      ? collapsedRef((button, closed) => {
-          travel.header = button
-          button.style.opacity = closed === 0 ? "" : "0"
-        })
-      : side === "in"
-        ? collapsedRef((button, closed) => {
+    side &&
+    collapsedRef(
+      side === "out"
+        ? (button, closed) => {
+            travel.header = button
+            button.style.opacity = closed === 0 ? "" : "0"
+          }
+        : (button, closed) => {
             travel.toggle = button
             const moving = closed > 0 && closed < 1
             travel.dx = moving ? travel.x * (1 - closed) : 0
@@ -91,15 +95,15 @@ export function SidebarToggle(props: { handoff?: "out" | "in" }) {
             if (full) full.style.opacity = `${1 - closed}`
 
             if (outline) outline.style.opacity = `${closed}`
-          })
-        : undefined
+          },
+    )
 
   return (
     <Tooltip
       class="shrink-0 [app-region:no-drag]"
       placement="bottom"
       // Held shut while the closed sidebar peeks on hover, where it would cover the peek.
-      forceOpen={peek() && !settings.appearance.sidebarOpen() ? false : undefined}
+      forceOpen={peek() && !docked() ? false : undefined}
       value={
         <>
           {language.t("command.sidebar.toggle")}
@@ -116,9 +120,9 @@ export function SidebarToggle(props: { handoff?: "out" | "in" }) {
         size="large"
         class="shrink-0"
         onMouseDown={(event) => event.preventDefault()}
-        onClick={() => settings.appearance.setSidebarOpen(!settings.appearance.sidebarOpen())}
+        onClick={() => command.trigger("sidebar.toggle")}
         aria-label={language.t(unread() ? "command.sidebar.toggle.unread" : "command.sidebar.toggle")}
-        aria-expanded={settings.appearance.sidebarOpen()}
+        aria-expanded={docked()}
         aria-controls="vertical-tabs-sidebar"
         icon={
           side === "in" ? (
@@ -131,11 +135,7 @@ export function SidebarToggle(props: { handoff?: "out" | "in" }) {
             </span>
           ) : (
             <span class="relative flex">
-              <Icon
-                name={
-                  side === "out" || (!side && settings.appearance.sidebarOpen()) ? "layout-left-full" : "layout-left"
-                }
-              />
+              <Icon name={side === "out" || (!side && docked()) ? "layout-left-full" : "layout-left"} />
               <UnreadBadge show={!side && unread()} ring="deep" />
             </span>
           )
@@ -150,13 +150,13 @@ export function SidebarToggle(props: { handoff?: "out" | "in" }) {
 function useCollapsedSlot() {
   const platform = usePlatform()
   const settings = useSettings()
-  const desktop = createMediaQuery("(min-width: 768px)")
+  const desktop = () => !isMobileLayout()
   const windows = () => platform.platform === "desktop" && platform.os === "windows"
   const mac = () => platform.platform === "desktop" && platform.os === "macos" && !platform.windowFullscreen?.()
 
   return {
     visible: () => desktop() && !windows() && settings.appearance.tabLayout() !== "horizontal",
-    open: settings.appearance.sidebarOpen,
+    open: () => settings.appearance.sidebarOpen() && !sidebarAutoHidden(),
     // Lays the toggle out as if the traffic lights were the header's first control.
     width: () =>
       mac()
@@ -181,7 +181,9 @@ export function paintCollapsedSlots(closed: number) {
 
 // The two vertical-tabs toggles, how far the header one rests from the collapsed one (x, y), and the offset the
 // collapsed one is drawn at now (dx, dy).
-const travel: { header?: HTMLElement; toggle?: HTMLElement; x: number; y: number; dx: number; dy: number } = {
+type Travel = { header?: HTMLElement; toggle?: HTMLElement; x: number; y: number; dx: number; dy: number }
+
+const travel: Travel = {
   x: 0,
   y: 0,
   dx: 0,
