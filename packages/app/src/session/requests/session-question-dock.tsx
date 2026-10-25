@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, onCleanup, onMount, type Component } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type Component } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useMutation } from "@tanstack/solid-query"
 import { Button } from "@opencode/ui/button"
@@ -8,7 +8,14 @@ import { DockPrompt } from "@opencode/session-ui/dock-prompt"
 import { Icon } from "@opencode/ui/icon"
 import { TextInput } from "@opencode/ui/text-input"
 import { useSpring } from "@opencode/ui/motion-spring"
-import { prefersReducedMotion } from "@opencode/ui/motion"
+import {
+  frameLoop,
+  observeReducedMotion,
+  prefersReducedMotion,
+  Spring,
+  type DurationOptions,
+} from "@opencode/ui/motion"
+import { motionTuning } from "@opencode/ui/motion-tuning"
 import { showToast } from "@/shell/notifications/toast"
 import type { FormAnswer, FormInfo, FormMultiselectField, FormStringField } from "@opencode/client/promise"
 import { useLanguage } from "@/runtime/i18n/language"
@@ -23,9 +30,74 @@ const cache = new Map<string, { tab: number; answers: string[][]; custom: string
 
 const IS_MAC = /(Mac|iPod|iPhone|iPad)/.test(navigator.platform)
 
-// A bounce-0 spring with a 0.3s visual duration, sampled for the Web Animations API.
-const SPRING_EASE =
-  "linear(0, 0.04, 0.131, 0.243, 0.358, 0.466, 0.562, 0.645, 0.715, 0.774, 0.821, 0.859, 0.89, 0.914, 0.934, 0.949, 0.96, 0.97, 0.977, 0.982, 1)"
+const group = "Timeline"
+
+const subsection = "Question"
+
+const target = '[data-component="dock-prompt"][data-kind="question"]'
+
+// Switching questions slides the old question out toward one side while the new one comes in from the other. They
+// cross on one spring, so the card is never empty.
+const slide = motionTuning.spring("question.switch", {
+  label: "Switch",
+  group,
+  subsection,
+  description: "Moving between questions with ← and →",
+  target,
+  presets: {
+    snappy: { duration: 0.3, bounce: 0 },
+    smooth: { duration: 0.4, bounce: 0 },
+    calm: { duration: 0.55, bounce: 0 },
+  },
+})
+
+// The question text and the answers box follow their new heights on this spring.
+const resize = motionTuning.spring("question.height", {
+  label: "Height",
+  group,
+  subsection,
+  target,
+  shipped: "smooth",
+  presets: {
+    snappy: { duration: 0.35, bounce: 0 },
+    smooth: { duration: 0.45, bounce: 0 },
+    calm: { duration: 0.55, bounce: 0 },
+  },
+})
+
+const travel = motionTuning.number("question.travel", {
+  label: "Travel",
+  group,
+  subsection,
+  value: 16,
+  min: 0,
+  max: 48,
+  step: 1,
+  unit: "px",
+})
+
+// How far through the switch the new question is fully shown, and the old one fully gone.
+const fadeIn = motionTuning.number("question.fade-in", {
+  label: "Fade in by",
+  group,
+  subsection,
+  value: 0.35,
+  min: 0.05,
+  max: 1,
+  step: 0.05,
+})
+
+const fadeOut = motionTuning.number("question.fade-out", {
+  label: "Fade out by",
+  group,
+  subsection,
+  value: 0.5,
+  min: 0.05,
+  max: 1,
+  step: 0.05,
+})
+
+const fade: DurationOptions = { duration: 0.2, bounce: 0 }
 
 type QuestionField = FormStringField | FormMultiselectField
 
@@ -116,9 +188,14 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
     focus: 0,
     minimized: false,
     listHeight: 0,
+    detailsHeight: 0,
+    ghostDetails: 0,
+    ghostList: 0,
+    switching: false,
   })
 
   let root: HTMLDivElement | undefined
+  let detailsFrame: HTMLDivElement | undefined
   let detailsRef: HTMLDivElement | undefined
   let optionsRef: HTMLDivElement | undefined
   let listRef: HTMLDivElement | undefined
@@ -128,7 +205,6 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
   let customInput: HTMLInputElement | undefined
   let optsRef: HTMLButtonElement[] = []
   let replied = false
-  const arrivals: Animation[] = []
 
   const question = createMemo(() => questions()[store.tab])
   const options = createMemo(() => question()?.options ?? [])
@@ -150,13 +226,40 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
   const collapse = useSpring(() => (store.minimized ? 1 : 0), { visualDuration: 0.3, bounce: 0 })
   const hidden = createMemo(() => Math.max(0, Math.min(1, collapse())))
   const optionsOff = createMemo(() => hidden() > 0.98)
-  // The answers box follows its list's measured height, so the dock grows and shrinks with each question. Under
-  // reduced motion it lands at once while the content fades.
+  // The question text and the answers box follow their measured heights, so the dock grows and shrinks with each
+  // question. Under reduced motion they land at once while the content fades.
+  const [tuned, setTuned] = createSignal(0)
+  onCleanup(motionTuning.subscribe(() => setTuned((n) => n + 1)))
+
+  const heightSpring = () => {
+    void tuned()
+
+    if (prefersReducedMotion()) return { visualDuration: 0.01, bounce: 0 }
+    const options = resize()
+    const omega = (2 * Math.PI) / options.duration
+
+    return { stiffness: omega * omega, damping: 2 * (1 - options.bounce) * omega, mass: 1 }
+  }
+
   const listHeight = useSpring(
     () => store.listHeight,
-    () => ({ visualDuration: prefersReducedMotion() ? 0.01 : 0.4, bounce: 0 }),
+    heightSpring,
     () => store.listHeight > 0,
   )
+
+  const detailsHeight = useSpring(
+    () => store.detailsHeight,
+    heightSpring,
+    () => store.detailsHeight > 0,
+  )
+
+  // While a switch slides content past a box's side, or the box is still shorter than what it holds, the cut edges fade
+  // instead of ending hard. The side fades follow the content's offset, which the switch writes as CSS variables.
+  const edgeMask = (cut: number) =>
+    store.switching || cut > 0.5
+      ? "linear-gradient(to right, transparent, #000 var(--question-edge-left, 0px), #000 calc(100% - var(--question-edge-right, 0px)), transparent), " +
+        `linear-gradient(to top, transparent, #000 ${Math.max(0, Math.min(24, cut)).toFixed(2)}px)`
+      : undefined
 
   const customUpdate = (value: string, selected: boolean = on()) => {
     const prev = input().trim()
@@ -259,14 +362,22 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
   })
 
   createEffect(() => {
-    const el = listRef
+    const list = listRef
+    const details = detailsRef
 
-    if (!el) return
-    const observer = new ResizeObserver((entries) => {
-      const size = entries[0]?.borderBoxSize[0]?.blockSize
-      if (size !== undefined) setStore("listHeight", size)
-    })
-    observer.observe(el)
+    if (!list || !details) return
+
+    const observer = new ResizeObserver((entries) =>
+      entries.forEach((entry) => {
+        const size = entry.borderBoxSize[0]?.blockSize
+
+        if (size === undefined) return
+        setStore(entry.target === list ? "listHeight" : "detailsHeight", size)
+      }),
+    )
+
+    observer.observe(list)
+    observer.observe(details)
     onCleanup(() => observer.disconnect())
   })
 
@@ -302,8 +413,6 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
   })
 
   onCleanup(() => {
-    arrivals.forEach((animation) => animation.cancel())
-
     if (replied) return
     cache.set(cacheKey, {
       tab: store.tab,
@@ -561,38 +670,128 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
     jump(store.tab - 1)
   }
 
-  // The new question's text and answers slide in from the side they come from and fade up; under reduced motion they
-  // only fade.
-  const arrive = (step: number) => {
-    arrivals.forEach((animation) => animation.cancel())
-    arrivals.length = 0
-    const reduced = prefersReducedMotion()
-    const x = (root?.matches(":dir(rtl)") ? -step : step) * 12
-    const frames = reduced
-      ? [{ opacity: 0 }, { opacity: 1 }]
-      : [
-          { opacity: 0, transform: `translate3d(${x}px,0,0)` },
-          { opacity: 1, transform: "none" },
-        ]
-    ;[detailsRef, optionsRef].forEach((el) => {
-      if (el?.animate) arrivals.push(el.animate(frames, { duration: reduced ? 150 : 300, easing: SPRING_EASE }))
+  // Switching questions: the question being left is copied into a still, inert ghost over its place, which slides out
+  // toward the side it is left on and fades, while the live text and answers, now showing the new question, slide in
+  // from the other side. The ghost fades out only as the new question fades in, so the card is never empty. A switch
+  // made mid-flight turns what is showing into another ghost from where it is. Under reduced motion they only cross-fade.
+  let ghosts: { els: HTMLElement[]; spring: Spring; dir: number; x: number; opacity: number }[] = []
+  let entering: { spring: Spring; dir: number } | undefined
+  let stopSwitch: VoidFunction | undefined
+
+  const reach = () => (prefersReducedMotion() ? 0 : travel())
+
+  const enteringFrame = (item: { spring: Spring; dir: number }) => ({
+    x: item.dir * reach() * (1 - item.spring.value),
+    opacity: Math.max(0, Math.min(1, item.spring.value / fadeIn())),
+  })
+
+  const paintSwitch = () => {
+    const live = [detailsRef, listRef]
+    const frame = entering ? enteringFrame(entering) : { x: 0, opacity: 1 }
+    live.forEach((el) => {
+      if (!el) return
+      el.style.transform = frame.x ? `translate3d(${frame.x.toFixed(2)}px,0,0)` : ""
+      el.style.opacity = frame.opacity < 1 ? frame.opacity.toFixed(4) : ""
+    })
+    const edges = { left: Math.max(0, -frame.x), right: Math.max(0, frame.x) }
+    ghosts.forEach((ghost) => {
+      const p = ghost.spring.value
+      const x = ghost.x - ghost.dir * reach() * p
+      const opacity = ghost.opacity * Math.max(0, 1 - p / fadeOut())
+      edges.left = Math.max(edges.left, -x)
+      edges.right = Math.max(edges.right, x)
+      ghost.els.forEach((el) => {
+        el.style.transform = `translate3d(${x.toFixed(2)}px,0,0)`
+        el.style.opacity = opacity.toFixed(4)
+      })
+    })
+    ;[detailsFrame, optionsRef].forEach((el) => {
+      el?.style.setProperty("--question-edge-left", `${edges.left.toFixed(2)}px`)
+      el?.style.setProperty("--question-edge-right", `${edges.right.toFixed(2)}px`)
     })
   }
 
+  const settleSwitch = () => {
+    stopSwitch?.()
+    stopSwitch = undefined
+    entering = undefined
+    ghosts.forEach((ghost) => ghost.els.forEach((el) => el.remove()))
+    ghosts = []
+    setStore({ ghostDetails: 0, ghostList: 0, switching: false })
+    paintSwitch()
+
+    return false
+  }
+
+  const stepSwitch = (dt: number) => {
+    entering?.spring.step(dt)
+    ghosts.forEach((ghost) => ghost.spring.step(dt))
+    const gone = ghosts.filter((ghost) => ghost.spring.value >= fadeOut() || ghost.spring.resting)
+    gone.forEach((ghost) => ghost.els.forEach((el) => el.remove()))
+    ghosts = ghosts.filter((ghost) => !gone.includes(ghost))
+
+    if (ghosts.length === 0 && store.ghostList > 0) setStore({ ghostDetails: 0, ghostList: 0 })
+
+    if (ghosts.length === 0 && (!entering || entering.spring.resting)) return settleSwitch()
+    paintSwitch()
+
+    return true
+  }
+
+  // Called before the question changes, while the live elements still show the question being left.
+  const depart = (step: number) => {
+    if (!detailsRef || !listRef || !detailsFrame || !optionsRef) return
+    const dir = root?.matches(":dir(rtl)") ? -step : step
+    const from = entering ? enteringFrame(entering) : { x: 0, opacity: 1 }
+    const options = prefersReducedMotion() ? fade : slide()
+    setStore({
+      ghostDetails: Math.max(store.ghostDetails, store.detailsHeight),
+      ghostList: Math.max(store.ghostList, store.listHeight),
+      switching: true,
+    })
+    ghosts.push({
+      els: [ghost(detailsRef, detailsFrame), ghost(listRef, optionsRef)],
+      spring: Spring.fromDuration(0, options).set(1),
+      dir,
+      x: from.x,
+      opacity: from.opacity,
+    })
+    entering = { spring: Spring.fromDuration(0, options).set(1), dir }
+  }
+
+  onCleanup(observeReducedMotion(() => prefersReducedMotion() && stopSwitch && settleSwitch()))
+  onCleanup(() => stopSwitch?.())
+
   const jump = (tab: number) => {
     if (sending() || tab === store.tab) return
-    const step = Math.sign(tab - store.tab)
+    const animate = !store.minimized
+
+    if (animate) depart(Math.sign(tab - store.tab))
     // The highlight's index moves before the question does, so it lands on the new question's answer instead of
     // gliding from the old one.
     setStore("focus", pickFocus(tab))
     setStore("tab", tab)
     setStore("editing", false)
 
-    if (store.minimized) return
+    if (!animate) return
     // The answers box is still springing to the new list's height, so focusing must not scroll it.
     focus(pickFocus(tab), { preventScroll: true })
-    arrive(step)
+    // The first frame is painted now, so the new question never shows at rest before it slides in.
+    paintSwitch()
+    stopSwitch ??= frameLoop.add(stepSwitch)
   }
+
+  const cycle = (by: number) => {
+    if (total() < 2) return
+    jump((store.tab + by + total()) % total())
+  }
+
+  onCleanup(
+    motionTuning.action({ id: "question.next", label: "Next question", group, subsection, run: () => cycle(1) }),
+  )
+  onCleanup(
+    motionTuning.action({ id: "question.back", label: "Previous question", group, subsection, run: () => cycle(-1) }),
+  )
 
   command.register("session.question.back", () => [
     {
@@ -663,21 +862,31 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
                 />
               </div>
             </div>
-            <div data-slot="question-details" ref={(el) => (detailsRef = el)}>
-              <div
-                data-slot="question-text"
-                style={{
-                  display: store.minimized ? "-webkit-box" : undefined,
-                  "-webkit-line-clamp": store.minimized ? "3" : undefined,
-                  "-webkit-box-orient": store.minimized ? "vertical" : undefined,
-                  overflow: store.minimized ? "hidden" : undefined,
-                }}
-              >
-                <bdi>{question()?.question}</bdi>
+            <div
+              data-slot="question-details-frame"
+              ref={(el) => (detailsFrame = el)}
+              style={{
+                height: store.detailsHeight > 0 ? `${detailsHeight()}px` : undefined,
+                "mask-image": edgeMask(Math.max(store.detailsHeight, store.ghostDetails) - detailsHeight()),
+                "mask-composite": "intersect",
+              }}
+            >
+              <div data-slot="question-details" ref={(el) => (detailsRef = el)}>
+                <div
+                  data-slot="question-text"
+                  style={{
+                    display: store.minimized ? "-webkit-box" : undefined,
+                    "-webkit-line-clamp": store.minimized ? "3" : undefined,
+                    "-webkit-box-orient": store.minimized ? "vertical" : undefined,
+                    overflow: store.minimized ? "hidden" : undefined,
+                  }}
+                >
+                  <bdi>{question()?.question}</bdi>
+                </div>
+                <Show when={!store.minimized && multi()}>
+                  <div data-slot="question-hint">{language.t("ui.question.multiHint")}</div>
+                </Show>
               </div>
-              <Show when={!store.minimized && multi()}>
-                <div data-slot="question-hint">{language.t("ui.question.multiHint")}</div>
-              </Show>
             </div>
           </>
         }
@@ -744,6 +953,8 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
           classList={{ "pointer-events-none": hidden() > 0.1 }}
           style={{
             height: store.listHeight > 0 ? `${Math.max(0, listHeight() * (1 - hidden()))}px` : undefined,
+            "mask-image": edgeMask(Math.max(store.listHeight, store.ghostList) - listHeight()),
+            "mask-composite": "intersect",
             opacity: `${Math.max(0, Math.min(1, 1 - hidden()))}`,
             visibility: optionsOff() ? "hidden" : "visible",
           }}
@@ -849,4 +1060,25 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
       </DockPrompt>
     </div>
   )
+}
+
+// A still copy of `el` laid over it in `host`, after the live content so it never comes first in the DOM, inert and
+// hidden from assistive tech. Ids are dropped so they stay unique, and typed text is carried over.
+function ghost(el: HTMLElement, host: HTMLElement) {
+  // SAFETY: a deep clone of an element is an element of the same kind.
+  const copy = el.cloneNode(true) as HTMLElement
+  copy.removeAttribute("id")
+  copy.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"))
+  const inputs = el.querySelectorAll("input")
+  copy.querySelectorAll("input").forEach((input, index) => (input.value = inputs[index]?.value ?? ""))
+  copy.dataset.ghost = "true"
+  copy.inert = true
+  copy.setAttribute("aria-hidden", "true")
+  copy.style.position = "absolute"
+  copy.style.top = "0"
+  copy.style.insetInline = "0"
+  copy.style.pointerEvents = "none"
+  host.append(copy)
+
+  return copy
 }

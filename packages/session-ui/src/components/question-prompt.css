@@ -84,6 +84,12 @@
     }
   }
 
+  /* Holds the question text at its sprung height, and the outgoing copy of it while questions switch. */
+  [data-slot="question-details-frame"] {
+    position: relative;
+    min-inline-size: 0;
+  }
+
   [data-slot="question-details"] {
     display: flex;
     flex-direction: column;
@@ -192,6 +198,7 @@
   }
 
   [data-slot="question-options"] {
+    position: relative;
     flex: 1 1 auto;
     min-block-size: 0;
     min-inline-size: 0;

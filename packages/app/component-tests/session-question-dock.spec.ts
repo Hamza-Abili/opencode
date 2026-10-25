@@ -202,6 +202,69 @@ story("switches questions with Left and Right outside the text field", async ({ 
   await expect(focused).toBeVisible()
 })
 
+story("keeps a question on screen and slides toward the trailing side while switching", async ({ mount, page }) => {
+  const component = await mount("app-current-session-surface--question-request")
+  const question = component.locator('[data-component="dock-prompt"][data-kind="question"]')
+  await expect(question.getByRole("radio", { name: /Focused/ })).toBeFocused()
+
+  // Samples every frame of a switch: how visible the most visible copy of the question text and of the answers is, and
+  // where the live question text sits.
+  const record = (key: string) =>
+    question.evaluate(async (root, key) => {
+      const shown = (slot: string) =>
+        Math.max(
+          0,
+          ...[...root.querySelectorAll(`[data-slot="${slot}"]`)].map((el) => {
+            let opacity = 1
+
+            for (let node: Element | null = el; node && node !== root; node = node.parentElement)
+              opacity *= Number(getComputedStyle(node).opacity)
+
+            return opacity
+          }),
+        )
+
+      const live = root.querySelector('[data-slot="question-details"]:not([data-ghost])')
+      const frames: { text: number; answers: number; x: number }[] = []
+
+      const done = new Promise<void>((resolve) => {
+        const tick = () => {
+          frames.push({
+            text: shown("question-details"),
+            answers: shown("question-options-list"),
+            x: live ? new DOMMatrix(getComputedStyle(live).transform).m41 : 0,
+          })
+
+          if (frames.length < 45) return void requestAnimationFrame(tick)
+          resolve()
+        }
+
+        requestAnimationFrame(tick)
+      })
+
+      ;(document.activeElement ?? root).dispatchEvent(
+        new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+      )
+      await done
+
+      return frames
+    }, key)
+
+  const forward = await record("ArrowRight")
+  await expect(question.getByRole("checkbox", { name: "Changed files", exact: true })).toBeVisible()
+  expect(Math.min(...forward.map((frame) => frame.text))).toBeGreaterThanOrEqual(0.5)
+  expect(Math.min(...forward.map((frame) => frame.answers))).toBeGreaterThanOrEqual(0.5)
+  expect(Math.max(...forward.map((frame) => frame.x))).toBeGreaterThan(0)
+  expect(forward.at(-1)?.x).toBe(0)
+
+  const backward = await record("ArrowLeft")
+  await expect(question.getByRole("radio", { name: /Focused/ })).toBeVisible()
+  expect(Math.min(...backward.map((frame) => frame.text))).toBeGreaterThanOrEqual(0.5)
+  expect(Math.min(...backward.map((frame) => frame.answers))).toBeGreaterThanOrEqual(0.5)
+  expect(Math.min(...backward.map((frame) => frame.x))).toBeLessThan(0)
+  await expect(question.locator("[data-ghost]")).toHaveCount(0)
+})
+
 story("toggles checkboxes with Space on key down and moves focus with arrows", async ({ mount, page }) => {
   const component = await mount("app-current-session-surface--question-request")
   const question = component.locator('[data-component="dock-prompt"][data-kind="question"]')
@@ -273,12 +336,14 @@ story("leaves Enter and Escape to an IME composition in the custom answer", asyn
   const input = question.getByRole("textbox", { name: "Type your own answer…", exact: true })
   await input.focus()
   await input.fill("にほん")
+
   const compose = (key: string, keyCode: number) =>
     input.evaluate(
       (element, init) =>
         element.dispatchEvent(new KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true })),
       { key, keyCode, isComposing: keyCode !== 229 },
     )
+
   await compose("Enter", 13)
   await compose("Escape", 27)
   await compose("Enter", 229)
