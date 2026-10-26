@@ -167,12 +167,9 @@ export interface DecisionRequest extends Schema.Schema.Type<typeof DecisionReque
 export const DecisionRequest = Schema.Struct({
   model: Model.Ref,
   input: Schema.Array(DecisionPart).annotate(description("The evidence every question is asked about, in order")),
-  questions: Schema.Array(DecisionQuestion).pipe(
-    Schema.check(Schema.isMinLength(1)),
-    Schema.refine((x): x is typeof x => new Set(x.map((question) => question.name)).size === x.length, {
-      message: "Decision question names must be unique",
-    }),
-  ),
+  questions: Schema.Array(DecisionQuestion)
+    .check(Schema.isMinLength(1))
+    .annotate(description("Question names must be unique; duplicates fail with InvalidRequestError")),
   providerOptions: ProviderOptions.pipe(optional),
 }).annotate({ identifier: "Generate.DecisionRequest" })
 

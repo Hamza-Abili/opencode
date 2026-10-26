@@ -16970,7 +16970,8 @@
             "items": {
               "$ref": "#/components/schemas/Generate.DecisionQuestion"
             },
-            "minItems": 1
+            "minItems": 1,
+            "description": "Question names must be unique; duplicates fail with InvalidRequestError"
           },
           "providerOptions": {
             "$ref": "#/components/schemas/Generate.ProviderOptions"

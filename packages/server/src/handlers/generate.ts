@@ -39,8 +39,12 @@ export const GenerateHandler = HttpApiBuilder.group(Api, "server.generate", (han
       .handle("generate.image", () =>
         Effect.fail(new NotImplementedError({ message: "Image generation is not implemented yet" })),
       )
-      .handle("generate.decisions", () =>
-        Effect.fail(new NotImplementedError({ message: "Decision generation is not implemented yet" })),
+      .handle("generate.decisions", (request) =>
+        new Set(request.payload.questions.map((question) => question.name)).size === request.payload.questions.length
+          ? Effect.fail(new NotImplementedError({ message: "Decision generation is not implemented yet" }))
+          : Effect.fail(
+              new InvalidRequestError({ message: "Decision question names must be unique", field: "questions" }),
+            ),
       )
   }),
 )
