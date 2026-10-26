@@ -184,16 +184,9 @@ export type MoneyUSDPerMillionTokens = number
 
 export type GenerateTextResponse = { data: { text: string } }
 
-export type GenerateBase64Media = { type: "base64"; mediaType: string; data: string }
-
-export type GenerateMediaUsage =
-  | { type: "tokens"; input?: number; output?: number; total?: number }
-  | { type: "credits"; credits: number }
-  | { type: "compute"; seconds: number }
-
 export type GenerateNotice = { type: "moderated" | "filtered" | "other"; message: string }
 
-export type GenerateProviderMetadata = { [x: string]: { [x: string]: JsonValue } }
+export type GenerateNative = { [x: string]: JsonValue }
 
 export type GeneratePredicateAnswer = { type: "predicate"; name: string; probability: number }
 
@@ -208,8 +201,6 @@ export type GenerateScoreAnswer = {
 }
 
 export type GenerateErrorAnswer = { type: "error"; name: string; reason: "refusal" }
-
-export type GenerateTokenUsage = { inputTokens?: number; outputTokens?: number; totalTokens?: number; cost?: number }
 
 export type VoiceTransportType = "webrtc" | "websocket"
 
@@ -430,6 +421,8 @@ export type SessionStatsTools =
   | { mode: "none" }
   | { mode: "summary"; totals: SessionStatsToolTotals }
   | { mode: "detail"; totals: SessionStatsToolTotals; usage: Array<SessionStatsToolUsage> }
+
+export type GenerateFile = { data: PromptBase64; mime: string; name?: string }
 
 export type PromptFileAttachment = {
   data: PromptBase64
@@ -675,13 +668,6 @@ export type ModelCost = {
   input: MoneyUSDPerMillionTokens
   output: MoneyUSDPerMillionTokens
   cache: { read: MoneyUSDPerMillionTokens; write: MoneyUSDPerMillionTokens }
-}
-
-export type GenerateImageResult = {
-  images: Array<GenerateBase64Media>
-  usage?: GenerateMediaUsage
-  notices?: Array<GenerateNotice>
-  providerMetadata?: GenerateProviderMetadata
 }
 
 export type GenerateChoiceAnswer = {
@@ -1001,6 +987,14 @@ export type UsageLimitsBudget = {
   picked: boolean
   shared: boolean
   resetsAt: number
+}
+
+export type GenerateImageResult = {
+  images: Array<GenerateFile>
+  notices?: Array<GenerateNotice>
+  cost?: MoneyUSD
+  tokens?: TokenUsageInfo
+  native?: GenerateNative
 }
 
 export type SessionMessageUser = {
@@ -2039,8 +2033,6 @@ export type FormState =
   | { status: "answered"; answer: FormAnswer }
   | { status: "cancelled"; message?: string }
 
-export type GenerateImageResponse = { data: GenerateImageResult }
-
 export type GenerateDecisionAnswer =
   | GeneratePredicateAnswer
   | GenerateChoiceAnswer
@@ -2411,6 +2403,8 @@ export type UsageLimitsInfo = {
   budgets: Array<UsageLimitsBudget>
 }
 
+export type GenerateImageResponse = { data: GenerateImageResult }
+
 export type SessionInboxUser = {
   id: SessionMessageID
   sessionID: SessionID
@@ -2458,8 +2452,9 @@ export type FormFields = [FormField, ...Array<FormField>]
 
 export type GenerateDecisionResult = {
   answers: Array<GenerateDecisionAnswer>
-  usage?: GenerateTokenUsage
-  providerMetadata?: GenerateProviderMetadata
+  cost?: MoneyUSD
+  tokens?: TokenUsageInfo
+  native?: GenerateNative
 }
 
 export type CredentialEntry = {
@@ -3723,16 +3718,10 @@ export type GenerateTextOutput = GenerateTextResponse["data"]
 export type GenerateImageInput = {
   readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
   readonly prompt: string
-  readonly images?:
-    | ReadonlyArray<
-        | { readonly type: "base64"; readonly mediaType: string; readonly data: string }
-        | { readonly type: "url"; readonly url: string; readonly mediaType?: string }
-      >
-    | undefined
+  readonly images?: ReadonlyArray<{ readonly data: string; readonly mime: string; readonly name?: string }> | undefined
   readonly n?: number | undefined
   readonly aspect?: string | undefined
   readonly resolution?: string | undefined
-  readonly providerOptions?: { readonly [x: string]: JsonValue } | undefined
 }
 
 export type GenerateImageOutput = GenerateImageResponse["data"]
@@ -3742,13 +3731,7 @@ export type GenerateDecisionsInput = {
   readonly input: ReadonlyArray<
     | { readonly type: "text"; readonly text: string }
     | { readonly type: "json"; readonly value: JsonValue }
-    | {
-        readonly type: "media"
-        readonly media:
-          | { readonly type: "base64"; readonly mediaType: string; readonly data: string }
-          | { readonly type: "url"; readonly url: string; readonly mediaType?: string }
-        readonly filename?: string
-      }
+    | { readonly type: "file"; readonly data: string; readonly mime: string; readonly name?: string }
   >
   readonly questions: ReadonlyArray<
     | { readonly type: "predicate"; readonly name: string; readonly instructions: string }
@@ -3765,7 +3748,6 @@ export type GenerateDecisionsInput = {
         readonly levels: ReadonlyArray<{ readonly label: string; readonly description?: string }>
       }
   >
-  readonly providerOptions?: { readonly [x: string]: JsonValue } | undefined
 }
 
 export type GenerateDecisionsOutput = GenerateDecisionsResponse["data"]

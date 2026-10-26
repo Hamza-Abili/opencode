@@ -896,7 +896,6 @@ const EndpointGenerateImage = (raw: RawClient["server.generate"]) => (input: Gen
         n: input["n"],
         aspect: input["aspect"],
         resolution: input["resolution"],
-        providerOptions: input["providerOptions"],
       },
     }).pipe(
       Effect.mapError(mapClientError),
@@ -907,12 +906,7 @@ const EndpointGenerateImage = (raw: RawClient["server.generate"]) => (input: Gen
 const EndpointGenerateDecisions = (raw: RawClient["server.generate"]) => (input: GenerateDecisionsInput) =>
   preserveEffect<GenerateDecisionsOutput>()(
     raw["generate.decisions"]({
-      payload: {
-        model: input["model"],
-        input: input["input"],
-        questions: input["questions"],
-        providerOptions: input["providerOptions"],
-      },
+      payload: { model: input["model"], input: input["input"], questions: input["questions"] },
     }).pipe(
       Effect.mapError(mapClientError),
       Effect.map((value) => value.data),

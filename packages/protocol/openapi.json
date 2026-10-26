@@ -16865,25 +16865,6 @@
         "required": ["_tag", "id", "message"],
         "additionalProperties": false
       },
-      "Generate.Base64Media": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["base64"]
-          },
-          "mediaType": {
-            "type": "string",
-            "description": "IANA media type, for example image/png"
-          },
-          "data": {
-            "type": "string",
-            "description": "Base64 payload without a data: URL prefix"
-          }
-        },
-        "required": ["type", "mediaType", "data"],
-        "additionalProperties": false
-      },
       "Generate.ChoiceAnswer": {
         "type": "object",
         "properties": {
@@ -16987,6 +16968,26 @@
           }
         ]
       },
+      "Generate.DecisionFilePart": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["file"]
+          },
+          "data": {
+            "$ref": "#/components/schemas/Prompt.Base64"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": ["type", "data", "mime"],
+        "additionalProperties": false
+      },
       "Generate.DecisionJsonPart": {
         "type": "object",
         "properties": {
@@ -16999,23 +17000,6 @@
         "required": ["type", "value"],
         "additionalProperties": false
       },
-      "Generate.DecisionMediaPart": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["media"]
-          },
-          "media": {
-            "$ref": "#/components/schemas/Generate.Media"
-          },
-          "filename": {
-            "type": "string"
-          }
-        },
-        "required": ["type", "media"],
-        "additionalProperties": false
-      },
       "Generate.DecisionPart": {
         "anyOf": [
           {
@@ -17025,7 +17009,7 @@
             "$ref": "#/components/schemas/Generate.DecisionJsonPart"
           },
           {
-            "$ref": "#/components/schemas/Generate.DecisionMediaPart"
+            "$ref": "#/components/schemas/Generate.DecisionFilePart"
           }
         ]
       },
@@ -17062,9 +17046,6 @@
             },
             "minItems": 1,
             "description": "Question names must be unique; duplicates fail with InvalidRequestError"
-          },
-          "providerOptions": {
-            "$ref": "#/components/schemas/Generate.ProviderOptions"
           }
         },
         "required": ["model", "input", "questions"],
@@ -17080,11 +17061,14 @@
             },
             "description": "One answer per question, in question order"
           },
-          "usage": {
-            "$ref": "#/components/schemas/Generate.TokenUsage"
+          "cost": {
+            "$ref": "#/components/schemas/Money.USD"
           },
-          "providerMetadata": {
-            "$ref": "#/components/schemas/Generate.ProviderMetadata"
+          "tokens": {
+            "$ref": "#/components/schemas/TokenUsage.Info"
+          },
+          "native": {
+            "$ref": "#/components/schemas/Generate.Native_1"
           }
         },
         "required": ["answers"],
@@ -17123,6 +17107,22 @@
         "additionalProperties": false,
         "description": "The provider declined this one question; the other answers still came back"
       },
+      "Generate.File": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Prompt.Base64"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": ["data", "mime"],
+        "additionalProperties": false
+      },
       "Generate.ImageRequest": {
         "type": "object",
         "properties": {
@@ -17135,7 +17135,7 @@
           "images": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Generate.Media"
+              "$ref": "#/components/schemas/Generate.File"
             }
           },
           "n": {
@@ -17147,9 +17147,6 @@
           },
           "resolution": {
             "type": "string"
-          },
-          "providerOptions": {
-            "$ref": "#/components/schemas/Generate.ProviderOptions"
           }
         },
         "required": ["model", "prompt"],
@@ -17161,11 +17158,8 @@
           "images": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Generate.Base64Media"
+              "$ref": "#/components/schemas/Generate.File"
             }
-          },
-          "usage": {
-            "$ref": "#/components/schemas/Generate.MediaUsage"
           },
           "notices": {
             "type": "array",
@@ -17173,75 +17167,26 @@
               "$ref": "#/components/schemas/Generate.Notice"
             }
           },
-          "providerMetadata": {
-            "$ref": "#/components/schemas/Generate.ProviderMetadata"
+          "cost": {
+            "$ref": "#/components/schemas/Money.USD"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenUsage.Info"
+          },
+          "native": {
+            "$ref": "#/components/schemas/Generate.Native"
           }
         },
         "required": ["images"],
         "additionalProperties": false
       },
-      "Generate.Media": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/Generate.Base64Media"
-          },
-          {
-            "$ref": "#/components/schemas/Generate.UrlMedia"
-          }
-        ]
+      "Generate.Native": {
+        "type": "object",
+        "description": "Provider-specific data the shared fields do not cover"
       },
-      "Generate.MediaUsage": {
-        "anyOf": [
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": ["tokens"]
-              },
-              "input": {
-                "type": "number"
-              },
-              "output": {
-                "type": "number"
-              },
-              "total": {
-                "type": "number"
-              }
-            },
-            "required": ["type"],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": ["credits"]
-              },
-              "credits": {
-                "type": "number"
-              }
-            },
-            "required": ["type", "credits"],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": ["compute"]
-              },
-              "seconds": {
-                "type": "number"
-              }
-            },
-            "required": ["type", "seconds"],
-            "additionalProperties": false
-          }
-        ],
-        "description": "How the provider metered the request"
+      "Generate.Native_1": {
+        "type": "object",
+        "description": "Provider-specific data the shared fields do not cover"
       },
       "Generate.Notice": {
         "type": "object",
@@ -17295,17 +17240,6 @@
         "required": ["type", "name", "instructions"],
         "additionalProperties": false,
         "description": "The probability that a statement is true"
-      },
-      "Generate.ProviderMetadata": {
-        "type": "object",
-        "additionalProperties": {
-          "type": "object"
-        },
-        "description": "Provider-specific response details, keyed by provider"
-      },
-      "Generate.ProviderOptions": {
-        "type": "object",
-        "description": "Options passed through to the resolved provider unchanged"
       },
       "Generate.ScoreAnswer": {
         "type": "object",
@@ -17386,42 +17320,6 @@
         "required": ["type", "name", "instructions", "levels"],
         "additionalProperties": false,
         "description": "Place the input on ordered levels, lowest first"
-      },
-      "Generate.TokenUsage": {
-        "type": "object",
-        "properties": {
-          "inputTokens": {
-            "type": "number"
-          },
-          "outputTokens": {
-            "type": "number"
-          },
-          "totalTokens": {
-            "type": "number"
-          },
-          "cost": {
-            "type": "number"
-          }
-        },
-        "additionalProperties": false
-      },
-      "Generate.UrlMedia": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["url"]
-          },
-          "url": {
-            "type": "string",
-            "description": "http(s) URL the server downloads before calling the provider"
-          },
-          "mediaType": {
-            "type": "string"
-          }
-        },
-        "required": ["type", "url"],
-        "additionalProperties": false
       },
       "GenerateDecisionsResponse": {
         "type": "object",

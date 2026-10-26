@@ -1189,7 +1189,6 @@ export function make(options: ClientOptions) {
               n: input["n"],
               aspect: input["aspect"],
               resolution: input["resolution"],
-              providerOptions: input["providerOptions"],
             },
             successStatus: 200,
             declaredStatuses: [400, 401, 404, 422, 501, 502, 503],
@@ -1202,12 +1201,7 @@ export function make(options: ClientOptions) {
           {
             method: "POST",
             path: `/api/experimental/generate/decisions`,
-            body: {
-              model: input["model"],
-              input: input["input"],
-              questions: input["questions"],
-              providerOptions: input["providerOptions"],
-            },
+            body: { model: input["model"], input: input["input"], questions: input["questions"] },
             successStatus: 200,
             declaredStatuses: [400, 401, 404, 422, 501, 502, 503],
             empty: false,

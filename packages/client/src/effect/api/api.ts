@@ -1420,11 +1420,10 @@ export type GenerateTextOperation<E = never> = (input: GenerateTextInput) => Eff
 export type GenerateImageInput = {
   readonly model: Model.Ref
   readonly prompt: string
-  readonly images?: ReadonlyArray<Generate.Media> | undefined
+  readonly images?: ReadonlyArray<Generate.File> | undefined
   readonly n?: number | undefined
   readonly aspect?: string | undefined
   readonly resolution?: string | undefined
-  readonly providerOptions?: Generate.ProviderOptions | undefined
 }
 export type GenerateImageOutput = Generate.ImageResult
 export type GenerateImageOperation<E = never> = (input: GenerateImageInput) => Effect.Effect<GenerateImageOutput, E>
@@ -1433,7 +1432,6 @@ export type GenerateDecisionsInput = {
   readonly model: Model.Ref
   readonly input: ReadonlyArray<Generate.DecisionPart>
   readonly questions: ReadonlyArray<Generate.DecisionQuestion>
-  readonly providerOptions?: Generate.ProviderOptions | undefined
 }
 export type GenerateDecisionsOutput = Generate.DecisionResult
 export type GenerateDecisionsOperation<E = never> = (

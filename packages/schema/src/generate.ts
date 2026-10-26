@@ -2,7 +2,10 @@ export * as Generate from "./generate.js"
 
 import { Schema } from "effect"
 import { Model } from "./model.js"
+import { Money } from "./money.js"
+import { Base64 } from "./prompt.js"
 import { PositiveInt, optional } from "./schema.js"
+import { TokenUsage } from "./token-usage.js"
 
 const description = (text: string) => ({ description: text })
 
@@ -10,42 +13,18 @@ const description = (text: string) => ({ description: text })
 // Shared
 // ---------------------------------------------------------------------------
 
-export interface Base64Media extends Schema.Schema.Type<typeof Base64Media> {}
-export const Base64Media = Schema.Struct({
-  type: Schema.Literal("base64"),
-  mediaType: Schema.String.annotate(description("IANA media type, for example image/png")),
-  data: Schema.String.annotate(description("Base64 payload without a data: URL prefix")),
-}).annotate({ identifier: "Generate.Base64Media" })
+export interface File extends Schema.Schema.Type<typeof File> {}
+export const File = Schema.Struct({
+  data: Base64,
+  mime: Schema.String,
+  name: Schema.String.pipe(optional),
+}).annotate({ identifier: "Generate.File" })
 
-export interface UrlMedia extends Schema.Schema.Type<typeof UrlMedia> {}
-export const UrlMedia = Schema.Struct({
-  type: Schema.Literal("url"),
-  url: Schema.String.annotate(description("http(s) URL the server downloads before calling the provider")),
-  mediaType: Schema.String.pipe(optional),
-}).annotate({ identifier: "Generate.UrlMedia" })
-
-export type Media = Base64Media | UrlMedia
-export const Media = Schema.Union([Base64Media, UrlMedia]).annotate({ identifier: "Generate.Media" })
-
-export const ProviderOptions = Schema.Record(Schema.String, Schema.Json).annotate({
-  identifier: "Generate.ProviderOptions",
-  description: "Options passed through to the resolved provider unchanged",
+export const Native = Schema.Record(Schema.String, Schema.Unknown).annotate({
+  identifier: "Generate.Native",
+  description: "Provider-specific data the shared fields do not cover",
 })
-export type ProviderOptions = typeof ProviderOptions.Type
-
-export const ProviderMetadata = Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Json)).annotate({
-  identifier: "Generate.ProviderMetadata",
-  description: "Provider-specific response details, keyed by provider",
-})
-export type ProviderMetadata = typeof ProviderMetadata.Type
-
-export interface TokenUsage extends Schema.Schema.Type<typeof TokenUsage> {}
-export const TokenUsage = Schema.Struct({
-  inputTokens: Schema.Finite.pipe(optional),
-  outputTokens: Schema.Finite.pipe(optional),
-  totalTokens: Schema.Finite.pipe(optional),
-  cost: Schema.Finite.pipe(optional).annotate(description("USD the provider reported charging, when it reports one")),
-}).annotate({ identifier: "Generate.TokenUsage" })
+export type Native = typeof Native.Type
 
 // ---------------------------------------------------------------------------
 // Image
@@ -55,7 +34,7 @@ export interface ImageRequest extends Schema.Schema.Type<typeof ImageRequest> {}
 export const ImageRequest = Schema.Struct({
   model: Model.Ref,
   prompt: Schema.String,
-  images: Schema.Array(Media)
+  images: Schema.Array(File)
     .pipe(optional)
     .annotate(description("Edit sources or style and subject references, in order")),
   n: PositiveInt.pipe(optional).annotate(description("Number of images to generate; defaults to 1")),
@@ -65,20 +44,7 @@ export const ImageRequest = Schema.Struct({
   resolution: Schema.String.pipe(optional).annotate(
     description("Size tier such as 1K, 2K or 4K; 1K is about as many pixels as 1024x1024 at the requested aspect"),
   ),
-  providerOptions: ProviderOptions.pipe(optional),
 }).annotate({ identifier: "Generate.ImageRequest" })
-
-export const MediaUsage = Schema.Union([
-  Schema.Struct({
-    type: Schema.Literal("tokens"),
-    input: Schema.Finite.pipe(optional),
-    output: Schema.Finite.pipe(optional),
-    total: Schema.Finite.pipe(optional),
-  }),
-  Schema.Struct({ type: Schema.Literal("credits"), credits: Schema.Finite }),
-  Schema.Struct({ type: Schema.Literal("compute"), seconds: Schema.Finite }),
-]).annotate({ identifier: "Generate.MediaUsage", description: "How the provider metered the request" })
-export type MediaUsage = typeof MediaUsage.Type
 
 export interface Notice extends Schema.Schema.Type<typeof Notice> {}
 export const Notice = Schema.Struct({
@@ -91,10 +57,11 @@ export const Notice = Schema.Struct({
 
 export interface ImageResult extends Schema.Schema.Type<typeof ImageResult> {}
 export const ImageResult = Schema.Struct({
-  images: Schema.Array(Base64Media),
-  usage: MediaUsage.pipe(optional),
+  images: Schema.Array(File),
   notices: Schema.Array(Notice).pipe(optional),
-  providerMetadata: ProviderMetadata.pipe(optional),
+  cost: Money.USD.pipe(optional),
+  tokens: TokenUsage.Info.pipe(optional),
+  native: Native.pipe(optional),
 }).annotate({ identifier: "Generate.ImageResult" })
 
 // ---------------------------------------------------------------------------
@@ -111,15 +78,14 @@ export const DecisionJsonPart = Schema.Struct({ type: Schema.Literal("json"), va
   identifier: "Generate.DecisionJsonPart",
 })
 
-export interface DecisionMediaPart extends Schema.Schema.Type<typeof DecisionMediaPart> {}
-export const DecisionMediaPart = Schema.Struct({
-  type: Schema.Literal("media"),
-  media: Media,
-  filename: Schema.String.pipe(optional),
-}).annotate({ identifier: "Generate.DecisionMediaPart" })
+export interface DecisionFilePart extends Schema.Schema.Type<typeof DecisionFilePart> {}
+export const DecisionFilePart = Schema.Struct({
+  type: Schema.Literal("file"),
+  ...File.fields,
+}).annotate({ identifier: "Generate.DecisionFilePart" })
 
-export type DecisionPart = DecisionTextPart | DecisionJsonPart | DecisionMediaPart
-export const DecisionPart = Schema.Union([DecisionTextPart, DecisionJsonPart, DecisionMediaPart]).annotate({
+export type DecisionPart = DecisionTextPart | DecisionJsonPart | DecisionFilePart
+export const DecisionPart = Schema.Union([DecisionTextPart, DecisionJsonPart, DecisionFilePart]).annotate({
   identifier: "Generate.DecisionPart",
 })
 
@@ -170,7 +136,6 @@ export const DecisionRequest = Schema.Struct({
   questions: Schema.Array(DecisionQuestion)
     .check(Schema.isMinLength(1))
     .annotate(description("Question names must be unique; duplicates fail with InvalidRequestError")),
-  providerOptions: ProviderOptions.pipe(optional),
 }).annotate({ identifier: "Generate.DecisionRequest" })
 
 const Probability = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 }))
@@ -218,6 +183,7 @@ export const DecisionAnswer = Schema.Union([PredicateAnswer, ChoiceAnswer, Score
 export interface DecisionResult extends Schema.Schema.Type<typeof DecisionResult> {}
 export const DecisionResult = Schema.Struct({
   answers: Schema.Array(DecisionAnswer).annotate(description("One answer per question, in question order")),
-  usage: TokenUsage.pipe(optional),
-  providerMetadata: ProviderMetadata.pipe(optional),
+  cost: Money.USD.pipe(optional),
+  tokens: TokenUsage.Info.pipe(optional),
+  native: Native.pipe(optional),
 }).annotate({ identifier: "Generate.DecisionResult" })
