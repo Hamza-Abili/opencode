@@ -712,13 +712,13 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
     const live = into ? arriving(into, v) : rest
     const moving = into ? speed(into) : 0
     const back = ghost?.tab === tab ? ghost : undefined
-    const kept = !back && ghost && leaving(ghost, v).shown > live.shown ? ghost : undefined
+    const kept = !back && ghost && leaving(ghost, v, into).shown > live.shown ? ghost : undefined
 
     if (ghost && ghost !== kept) ghost.els.forEach((el) => el.remove())
     // A kept ghost leaves on the new switch's spring from where it is, so it fades no faster than the next question
     // arrives.
     ghost = kept
-      ? { ...kept, ...track(leaving(kept, v), kept.to, kept.side, speed(kept), options, v.launch()) }
+      ? { ...kept, ...track(leaving(kept, v, into), kept.to, kept.side, speed(kept), options, v.launch()) }
       : {
           ...track(live, -dir * reach, -dir, moving, options, v.launch()),
           tab: store.tab,
@@ -727,7 +727,7 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
           list: content.list,
         }
     into = back
-      ? track(leaving(back, v), 0, dir, speed(back), options, v.launch())
+      ? track(leaving(back, v, into), 0, dir, speed(back), options, v.launch())
       : track({ x: dir * reach, shown: 0, settle: 0 }, 0, dir, 0, options, v.launch())
   }
 
@@ -749,7 +749,7 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
     if (live.streak) liveStreak?.setAttribute("stdDeviation", `${live.blur.toFixed(2)} 0`)
 
     if (ghost) {
-      const pose = look(name, v, leaving(ghost, v), ghost.side, speed(ghost))
+      const pose = look(name, v, leaving(ghost, v, into), ghost.side, speed(ghost))
       ghost.els.forEach((el) => place(el, pose, filters.ghost))
 
       if (pose.streak) ghostStreak?.setAttribute("stdDeviation", `${pose.blur.toFixed(2)} 0`)
@@ -790,7 +790,7 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
 
     if (into?.spring.resting) into = undefined
 
-    if (ghost && (ghost.spring.value >= variants[style()].fadeOut() || ghost.spring.resting)) {
+    if (ghost && leaving(ghost, variants[style()], into).shown <= 0) {
       ghost.els.forEach((el) => el.remove())
       ghost = undefined
     }
@@ -1137,14 +1137,16 @@ function arriving(track: Track, v: Tuning): Pose {
   }
 }
 
-// Leaves from where it set off, fully gone by the fade-out point.
-function leaving(track: Track, v: Tuning): Pose {
+// Leaves from where it set off, fully gone by the fade-out point, but never fading faster than `next` arrives, so a
+// copy kept through rapid keys holds the card until the new question has caught up.
+function leaving(track: Track, v: Tuning, next?: Track): Pose {
   const p = unit(track.spring.value)
   const gone = unit(p / v.fadeOut())
+  const arrived = next ? arriving(next, v).shown : 1
 
   return {
     x: track.from.x + (track.to - track.from.x) * p,
-    shown: track.from.shown * (1 - gone),
+    shown: Math.max(track.from.shown * (1 - gone), Math.min(track.from.shown, 1 - arrived)),
     settle: track.from.settle * (1 - gone),
   }
 }
