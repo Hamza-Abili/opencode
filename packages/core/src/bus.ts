@@ -198,8 +198,7 @@ export function configured(options?: Options) {
         const pubsub = {
           live: yield* PubSub.unbounded<Event.Payload>(),
           durable: new Map<string, Set<PubSub.PubSub<void>>>(),
-          typed: new Map<string, PubSub.PubSub<Event.Payload>>(),
-          selected: new Map<string, Set<Queue.Queue<Event.Payload>>>(),
+          typed: new Map<string, Set<Queue.Queue<Event.Payload>>>(),
         }
         const projectors = new Map<string, Subscriber[]>()
         const listeners = new Array<Subscriber>()
@@ -266,15 +265,6 @@ export function configured(options?: Options) {
           }
         })
 
-        const getOrCreate = (definition: Event.Definition) =>
-          Effect.gen(function* () {
-            const existing = pubsub.typed.get(definition.type)
-            if (existing) return existing
-            const created = yield* PubSub.unbounded<Event.Payload>()
-            pubsub.typed.set(definition.type, created)
-            return created
-          })
-
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
             yield* PubSub.shutdown(pubsub.live)
@@ -283,9 +273,8 @@ export function configured(options?: Options) {
               (pubsubs) => Effect.forEach(pubsubs, PubSub.shutdown, { discard: true }),
               { discard: true },
             )
-            yield* Effect.forEach(pubsub.typed.values(), PubSub.shutdown, { discard: true })
             yield* Effect.forEach(
-              pubsub.selected.values(),
+              pubsub.typed.values(),
               (queues) => Effect.forEach(queues, Queue.shutdown, { discard: true }),
               { discard: true },
             )
@@ -512,9 +501,7 @@ export function configured(options?: Options) {
               { discard: true },
             )
             const typed = pubsub.typed.get(event.type)
-            if (typed) yield* PubSub.publish(typed, event)
-            const selected = pubsub.selected.get(event.type)
-            if (selected) yield* Effect.forEach(selected, (queue) => Queue.offer(queue, event), { discard: true })
+            if (typed) yield* Effect.forEach(typed, (queue) => Queue.offer(queue, event), { discard: true })
             yield* PubSub.publish(pubsub.live, event)
           })
         }
@@ -766,10 +753,7 @@ export function configured(options?: Options) {
         ): Stream.Stream<SubscribePayload<D>>
         function subscribe(input?: Event.Definition | readonly Event.Definition[]): Stream.Stream<Event.Payload> {
           if (input === undefined) return streamLive()
-          if (isDefinition(input)) {
-            return local(Stream.unwrap(getOrCreate(input).pipe(Effect.map((pubsub) => Stream.fromPubSub(pubsub)))))
-          }
-          const types = new Set(input.map((definition) => definition.type))
+          const types = new Set((isDefinition(input) ? [input] : input).map((definition) => definition.type))
           return local(
             Stream.unwrap(
               Effect.acquireRelease(
@@ -777,15 +761,19 @@ export function configured(options?: Options) {
                   Effect.tap((queue) =>
                     Effect.sync(() => {
                       for (const type of types) {
-                        const queues = pubsub.selected.get(type) ?? new Set()
-                        pubsub.selected.set(type, queues.add(queue))
+                        const queues = pubsub.typed.get(type) ?? new Set()
+                        pubsub.typed.set(type, queues.add(queue))
                       }
                     }),
                   ),
                 ),
                 (queue) =>
                   Effect.sync(() => {
-                    for (const type of types) pubsub.selected.get(type)?.delete(queue)
+                    for (const type of types) {
+                      const queues = pubsub.typed.get(type)
+                      queues?.delete(queue)
+                      if (queues?.size === 0) pubsub.typed.delete(type)
+                    }
                   }).pipe(Effect.andThen(Queue.shutdown(queue))),
               ).pipe(Effect.map(Stream.fromQueue)),
             ),

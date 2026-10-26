@@ -4085,7 +4085,6 @@ export type EventSubscribeInput = {
           | "vcs.branch.updated"
           | "mcp.status.changed"
           | "mcp.resources.changed"
-          | "server.connected"
           | `${"rpc."}${string}`
         >
       | undefined

@@ -261,16 +261,22 @@ export const make = Effect.fn("PluginHost.make")(function* (
       activate: (input) => integration.connection.activate(input.credentialID),
     },
     event: {
-      subscribe: (input) => {
+      // The bus only delivers the requested types, which TypeScript cannot follow through the generic signature.
+      subscribe: ((input?: { readonly types?: ReadonlyArray<string> }) => {
         if (!input?.types?.length) return bus.subscribe().pipe(Stream.filter(isPublicEvent))
+        const unknown = new Array<string>()
         const [first, ...rest] = input.types.flatMap((type) => {
           if (isRpcType(type)) return [Rpc.eventDefinition(type)]
           const definition = EventManifest.Server.get(type)
+          if (!definition) unknown.push(type)
           return definition ? [definition] : []
         })
-        if (!first) return Stream.never
-        return bus.subscribe([first, ...rest]).pipe(Stream.filter(isPublicEvent))
-      },
+        const events = first ? bus.subscribe([first, ...rest]) : Stream.never
+        if (unknown.length === 0) return events
+        return Stream.unwrap(
+          Effect.logWarning("ignoring unknown event types", { pluginID, types: unknown }).pipe(Effect.as(events)),
+        )
+      }) as Plugin.Context["event"]["subscribe"],
     },
     experimental: {
       terminal: {

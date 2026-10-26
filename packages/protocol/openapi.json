@@ -10205,8 +10205,7 @@
                             "installation.update-available",
                             "vcs.branch.updated",
                             "mcp.status.changed",
-                            "mcp.resources.changed",
-                            "server.connected"
+                            "mcp.resources.changed"
                           ]
                         },
                         {
@@ -10315,8 +10314,7 @@
                               "installation.update-available",
                               "vcs.branch.updated",
                               "mcp.status.changed",
-                              "mcp.resources.changed",
-                              "server.connected"
+                              "mcp.resources.changed"
                             ]
                           },
                           {
@@ -10332,7 +10330,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Only send events of these types. When omitted, all events are sent."
+              "description": "Only send events of these types, plus the initial server.connected event. When omitted, all events are sent."
             },
             "required": false
           }

@@ -40,13 +40,16 @@ const query = <const Definitions extends ReadonlyArray<Definition>>(definitions:
     types: Schema.optional(
       Schema.ArrayEnsure(
         Schema.Union([
-          Schema.Literals([
-            ...new Set([...definitions.map((definition) => definition.type), "server.connected"]),
-          ] as ReadonlyArray<Definitions[number]["type"] | "server.connected">),
+          Schema.Literals(
+            definitions.map((definition) => definition.type) as ReadonlyArray<Definitions[number]["type"]>,
+          ),
           rpcEvent.fields.type,
         ]),
       ),
-    ).annotate({ description: "Only send events of these types. When omitted, all events are sent." }),
+    ).annotate({
+      description:
+        "Only send events of these types, plus the initial server.connected event. When omitted, all events are sent.",
+    }),
   }).annotate({ identifier: "EventSubscribeQuery" })
 
 const make = <const Definitions extends ReadonlyArray<Definition>>(definitions: Definitions) => {

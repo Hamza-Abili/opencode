@@ -47,22 +47,22 @@ export const make = Effect.fn("EventFeed.make")(function* (
 
   const publish = Effect.fnUntraced(function* (event: Event.Payload) {
     if (!isOpenCodeEvent(event)) return
-    const targets = Array.from(subscribers).filter(([, types]) => !types || types.has(event.type))
-    if (targets.length === 0) return
-    const encoded = yield* Effect.try({
-      try: () => render(event),
-      catch: (cause) => new EncodingError({ eventID: event.id, eventType: event.type, cause }),
-    }).pipe(
-      Effect.catch((error) =>
-        Effect.logError("Failed to encode public event", {
-          eventID: error.eventID,
-          eventType: error.eventType,
-          cause: error.cause,
-        }).pipe(Effect.andThen(fail(error)), Effect.as(undefined)),
-      ),
-    )
-    if (encoded === undefined) return
-    for (const [subscriber] of targets) {
+    let encoded: string | undefined
+    for (const [subscriber, types] of subscribers) {
+      if (types && !types.has(event.type)) continue
+      encoded ??= yield* Effect.try({
+        try: () => render(event),
+        catch: (cause) => new EncodingError({ eventID: event.id, eventType: event.type, cause }),
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.logError("Failed to encode public event", {
+            eventID: error.eventID,
+            eventType: error.eventType,
+            cause: error.cause,
+          }).pipe(Effect.andThen(fail(error)), Effect.as(undefined)),
+        ),
+      )
+      if (encoded === undefined) return
       if (Queue.offerUnsafe(subscriber, encoded)) continue
       subscribers.delete(subscriber)
       Queue.failCauseUnsafe(subscriber, Cause.fail(new SubscriberOverflowError({ capacity })))
