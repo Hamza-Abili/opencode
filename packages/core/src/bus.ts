@@ -1,6 +1,6 @@
 export * as Bus from "./bus.js"
 
-import { Cause, Clock, Context, Effect, Layer, Option, PubSub, Queue, Schema, Stream } from "effect"
+import { Cause, Clock, Context, Effect, Layer, Option, PubSub, Schema, Stream } from "effect"
 import { Event } from "@opencode/schema/event"
 import type { EventLog } from "@opencode/schema/event-log"
 import { and, asc, eq, gt, lte, sql } from "drizzle-orm"
@@ -198,7 +198,7 @@ export function configured(options?: Options) {
         const pubsub = {
           live: yield* PubSub.unbounded<Event.Payload>(),
           durable: new Map<string, Set<PubSub.PubSub<void>>>(),
-          typed: new Map<string, Set<Queue.Queue<Event.Payload>>>(),
+          typed: new Map<string, Set<PubSub.PubSub<Event.Payload>>>(),
         }
         const projectors = new Map<string, Subscriber[]>()
         const listeners = new Array<Subscriber>()
@@ -275,7 +275,7 @@ export function configured(options?: Options) {
             )
             yield* Effect.forEach(
               pubsub.typed.values(),
-              (queues) => Effect.forEach(queues, Queue.shutdown, { discard: true }),
+              (subscribers) => Effect.forEach(subscribers, PubSub.shutdown, { discard: true }),
               { discard: true },
             )
           }),
@@ -500,9 +500,11 @@ export function configured(options?: Options) {
               (listener) => (isolateListeners ? observe(event, listener) : listener(event)),
               { discard: true },
             )
-            const typed = pubsub.typed.get(event.type)
-            if (typed) yield* Effect.forEach(typed, (queue) => Queue.offer(queue, event), { discard: true })
+            // Type subscribers resume inline and may publish follow-up events, so live subscribers get this one first.
             yield* PubSub.publish(pubsub.live, event)
+            const typed = pubsub.typed.get(event.type)
+            if (typed)
+              yield* Effect.forEach(typed, (subscriber) => PubSub.publish(subscriber, event), { discard: true })
           })
         }
 
@@ -754,28 +756,27 @@ export function configured(options?: Options) {
         function subscribe(input?: Event.Definition | readonly Event.Definition[]): Stream.Stream<Event.Payload> {
           if (input === undefined) return streamLive()
           const types = new Set((isDefinition(input) ? [input] : input).map((definition) => definition.type))
+          // One PubSub per subscription, registered under each type, keeps publish order across types.
           return local(
             Stream.unwrap(
               Effect.acquireRelease(
-                Queue.unbounded<Event.Payload>().pipe(
-                  Effect.tap((queue) =>
+                PubSub.unbounded<Event.Payload>().pipe(
+                  Effect.tap((subscriber) =>
                     Effect.sync(() => {
-                      for (const type of types) {
-                        const queues = pubsub.typed.get(type) ?? new Set()
-                        pubsub.typed.set(type, queues.add(queue))
-                      }
+                      for (const type of types)
+                        pubsub.typed.set(type, (pubsub.typed.get(type) ?? new Set()).add(subscriber))
                     }),
                   ),
                 ),
-                (queue) =>
+                (subscriber) =>
                   Effect.sync(() => {
                     for (const type of types) {
-                      const queues = pubsub.typed.get(type)
-                      queues?.delete(queue)
-                      if (queues?.size === 0) pubsub.typed.delete(type)
+                      const subscribers = pubsub.typed.get(type)
+                      subscribers?.delete(subscriber)
+                      if (subscribers?.size === 0) pubsub.typed.delete(type)
                     }
-                  }).pipe(Effect.andThen(Queue.shutdown(queue))),
-              ).pipe(Effect.map(Stream.fromQueue)),
+                  }).pipe(Effect.andThen(PubSub.shutdown(subscriber))),
+              ).pipe(Effect.flatMap(PubSub.subscribe), Effect.map(Stream.fromSubscription)),
             ),
           )
         }
