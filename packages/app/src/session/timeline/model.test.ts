@@ -14,7 +14,7 @@ const assistant = (id: string): SessionMessageAssistant => ({
 })
 
 describe("timeline model", () => {
-  test("enriches a retained transcript only once, including after an older page changes its leading turn", async () => {
+  test("does not enrich a different leading turn after prepending to a retained transcript", async () => {
     const messages: SessionMessageInfo[] = [user("msg_user"), assistant("msg_latest")]
     let loads = 0
 
@@ -39,6 +39,44 @@ describe("timeline model", () => {
     const reloaded = [...messages]
     await enrichLeadingTurn({ ...input, messages: () => reloaded })
     expect(loads).toBe(3)
+  })
+
+  test.each(["switch", "failure", "reconnect"])("resumes the original leading turn after %s", async (interruption) => {
+    const messages: SessionMessageInfo[] = [assistant("msg_latest")]
+    let current = true
+    let loads = 0
+
+    const input = {
+      current: () => current,
+      messages: () => messages,
+      more: () => true,
+      loading: () => false,
+      loadMore: async () => {
+        loads += 1
+
+        if (loads === 1 && interruption === "failure") throw new Error("history failed")
+
+        messages.unshift(assistant("msg_previous_turn"), user("msg_parent"))
+      },
+      pause: async () => {
+        if (interruption === "switch") current = false
+      },
+      maxPages: 3,
+    }
+
+    if (interruption === "failure") await expect(enrichLeadingTurn(input)).rejects.toThrow("history failed")
+
+    if (interruption !== "failure") await enrichLeadingTurn(input)
+
+    if (interruption === "reconnect") messages.splice(0, messages.length, assistant("msg_latest"))
+    current = true
+    await enrichLeadingTurn({ ...input, pause: async () => undefined })
+
+    expect(messages.map((message) => message.id)).toEqual(["msg_previous_turn", "msg_parent", "msg_latest"])
+    expect(loads).toBe(interruption === "switch" ? 1 : 2)
+
+    await enrichLeadingTurn({ ...input, pause: async () => undefined })
+    expect(loads).toBe(interruption === "switch" ? 1 : 2)
   })
 
   test.each([

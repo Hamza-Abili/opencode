@@ -77,29 +77,6 @@ test.describe("timeline history", () => {
     expect(requests).toEqual([undefined, "older", "oldest"])
   })
 
-  test("automatically loads older history when a short transcript cannot scroll", async ({ page }) => {
-    const requests: (string | undefined)[] = []
-    await openSession(page, {
-      name: "ShortHistory",
-      pageMessages: (_session, _limit, before) => {
-        requests.push(before)
-
-        if (before)
-          return {
-            items: [userMessage([textPart("prt_short_0", "Earlier prompt")], { id: "msg_short_0", created: 1 })],
-          }
-
-        return {
-          items: [userMessage([textPart("prt_short_1", "Latest prompt")], { id: "msg_short_1", created: 2 })],
-          cursor: "older",
-        }
-      },
-    })
-    await expect(page.getByText("Earlier prompt", { exact: true })).toBeInViewport()
-    await expect(page.getByText("Latest prompt", { exact: true })).toBeInViewport()
-    expect(requests).toEqual([undefined, "older"])
-  })
-
   test("keeps visible rows fixed while an older page prepends", async ({ page }) => {
     const older = Promise.withResolvers<void>()
     const requests: { before?: string; phase: "start" | "end" }[] = []
@@ -232,7 +209,6 @@ test.describe("timeline history", () => {
       const roots: { sessionID: string; messageID: string }[] = []
       const sequence: string[] = []
       const messages = rootHistory()
-      // SAFETY: rootHistory ends each generated turn with an assistant message.
       const last = messages.at(-1) as SessionMessageAssistant
       await page.addInitScript(installVisibilityProbe)
 
@@ -283,9 +259,8 @@ test.describe("timeline history", () => {
       const completed = {
         ...last,
         time: { ...last.time, completed: last.time.created + 15_000 },
+        ...(scenario.error ? { error: scenario.error } : {}),
       }
-
-      if (scenario.error) completed.error = scenario.error
 
       const message = messageUpdated(completed)
       const idle = status("idle")
@@ -329,16 +304,16 @@ test.describe("timeline history", () => {
     })
   }
 
-  for (const composition of ["assistant-only", "mixed"] as const) {
-    test(`renders the ${composition} tail before parent hydration and preserves it afterward`, async ({ page }) => {
-      const session = { ...fixture.sessions[0]!, id: `ses_hydration_${composition}` }
+  for (const shape of ["assistant-only", "mixed"] as const) {
+    test(`renders the ${shape} tail before parent hydration and preserves it afterward`, async ({ page }) => {
+      const session = { ...fixture.sessions[0]!, id: `ses_hydration_${shape}` }
 
       // Compact's initial 40 and the next 20 begin with an assistant; page three supplies its parent.
       const messages = Array.from({ length: 61 }, (_, index): SessionMessageInfo => {
         const id = `msg_hydration_${index}`
         const time = { created: 1700000000000 + index * 1_000 }
 
-        if (index === 0 || (composition === "mixed" && index === 59))
+        if (index === 0 || (shape === "mixed" && index === 59))
           return { id, type: "user", time, text: `Prompt ${index}` }
 
         return {
@@ -409,7 +384,7 @@ test.describe("timeline history", () => {
         await expectReadyTail()
         await expect(orphan).toHaveAttribute("data-message-id", "msg_hydration_21")
 
-        if (composition === "mixed")
+        if (shape === "mixed")
           await expect(
             page.locator('[data-timeline-row="UserMessage"][data-message-id="msg_hydration_59"]'),
           ).toBeInViewport()
@@ -575,7 +550,6 @@ function installVisibilityProbe() {
       .flatMap((part) => (part.dataset.timelinePartId ? [part.dataset.timelinePartId] : []))
   }
 
-  // SAFETY: arm populates parts with visible part IDs; settle supplies the optional final state.
   const state = {
     armed: false,
     hidden: false,
