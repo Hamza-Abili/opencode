@@ -62,6 +62,11 @@ it.live("uses base configuration without depending on process.cwd()", () =>
     expect(yield* request(handler, legacy)).toEqual({
       model: { providerID: "base", model: "default" },
     })
+
+    const deprecatedPath = new URL("http://opencode.local/api/experimental/generate")
+    expect(yield* request(handler, deprecatedPath)).toEqual({
+      model: { providerID: "base", model: "default" },
+    })
   }),
 )
 

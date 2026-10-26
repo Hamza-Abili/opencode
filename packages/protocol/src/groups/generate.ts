@@ -24,23 +24,36 @@ const mediaErrors = [
   LocationNotFoundError,
 ]
 
+const textContract = {
+  payload: Schema.Struct({
+    prompt: Schema.String,
+    model: Model.Ref.pipe(Schema.optional),
+  }),
+  success: Schema.Struct({
+    data: Schema.Struct({ text: Schema.String }),
+  }).annotate({ identifier: "GenerateTextResponse" }),
+  error: [InvalidRequestError, ServiceUnavailableError, LocationNotFoundError],
+}
+
 export const GenerateGroup = HttpApiGroup.make("server.generate")
   .add(
-    HttpApiEndpoint.post("generate.text", "/api/experimental/generate/text", {
-      payload: Schema.Struct({
-        prompt: Schema.String,
-        model: Model.Ref.pipe(Schema.optional),
-      }),
-      success: Schema.Struct({
-        data: Schema.Struct({ text: Schema.String }),
-      }).annotate({ identifier: "GenerateTextResponse" }),
-      error: [InvalidRequestError, ServiceUnavailableError, LocationNotFoundError],
-    }).annotateMerge(
+    HttpApiEndpoint.post("generate.text", "/api/experimental/generate/text", textContract).annotateMerge(
       OpenApi.annotations({
         identifier: "experimental.generate.text",
         summary: "Generate text",
         description:
           "Run one stateless model generation using the server's base configuration and return the assistant text. Uses the base configuration's default model when none is specified.",
+      }),
+    ),
+  )
+  // Kept so clients built before the move to /generate/text keep working; omitted from generated clients.
+  .add(
+    HttpApiEndpoint.post("generate.textLegacy", "/api/experimental/generate", textContract).annotateMerge(
+      OpenApi.annotations({
+        identifier: "experimental.generate.textLegacy",
+        summary: "Generate text (deprecated path)",
+        description: "Deprecated alias of POST /api/experimental/generate/text.",
+        deprecated: true,
       }),
     ),
   )
