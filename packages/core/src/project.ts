@@ -54,8 +54,7 @@ export const root = Effect.fn("Project.root")(
   ) {
     for (let current: string = input; ; current = path.dirname(current)) {
       for (const marker of markers) {
-        const search = path.join(current, marker)
-        if (yield* fs.exists(search)) return AbsolutePath.make(path.dirname(search))
+        if (yield* fs.exists(path.join(current, marker))) return AbsolutePath.make(current)
       }
       if (path.dirname(current) === current) return undefined
     }
