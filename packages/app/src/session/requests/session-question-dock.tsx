@@ -1,4 +1,14 @@
-import { For, Show, batch, createEffect, createMemo, onCleanup, onMount, type Component } from "solid-js"
+import {
+  For,
+  Show,
+  batch,
+  createEffect,
+  createMemo,
+  createUniqueId,
+  onCleanup,
+  onMount,
+  type Component,
+} from "solid-js"
 import { createStore } from "solid-js/store"
 import { useMutation } from "@tanstack/solid-query"
 import { Button } from "@opencode/ui/button"
@@ -35,19 +45,19 @@ const subsection = "Question"
 
 const target = '[data-component="dock-prompt"][data-kind="question"]'
 
-// Switching questions slides the old question out toward one side while the new one comes in from the other. They
-// cross on one spring, so the card is never empty.
-const slide = motionTuning.spring("question.switch", {
-  label: "Switch",
+type Style = "morph" | "slide" | "wipe"
+
+// How the old question gives way to the new one. A: the card reshapes as one surface while the old question blurs and
+// shrinks away and the new one resolves out of a blur. B: they slide past each other, streaked along the way they
+// move. C: a soft edge sweeps across the card, showing the new question behind it and the old one ahead of it.
+const style = motionTuning.choice("question.style", {
+  label: "Switch style",
   group,
   subsection,
   description: "Moving between questions with ← and →",
   target,
-  presets: {
-    snappy: { duration: 0.3, bounce: 0 },
-    smooth: { duration: 0.4, bounce: 0 },
-    calm: { duration: 0.55, bounce: 0 },
-  },
+  value: "morph",
+  labels: { morph: "A · Island morph", slide: "B · Blur slide", wipe: "C · Soft wipe" },
 })
 
 // The question text and the answers box follow their new heights on this spring.
@@ -64,62 +74,69 @@ const resize = motionTuning.spring("question.height", {
   },
 })
 
-const travel = motionTuning.number("question.travel", {
-  label: "Travel",
-  group,
-  subsection,
-  value: 16,
-  min: 0,
-  max: 48,
-  step: 1,
-  unit: "px",
-})
+// A style's knobs, besides its switch spring. Both copies of the question move on that spring: `fadeIn` and `fadeOut`
+// say how far through it the new question is fully shown and the old one fully gone, while blur and scale ease out
+// over the whole of it. `launch` starts the spring at that multiple of its natural speed, so it answers the key at
+// once without overshooting. A style without a knob keeps it at `off`.
+const ranges = {
+  launch: { label: "Launch speed", min: 0, max: 1, step: 0.05, off: 0 },
+  travel: { label: "Travel", min: 0, max: 48, step: 1, unit: "px", off: 0 },
+  fadeIn: { label: "Fade in by", min: 0.05, max: 1, step: 0.05, off: 1 },
+  fadeOut: { label: "Fade out by", min: 0.05, max: 1, step: 0.05, off: 1 },
+  blur: { label: "Blur", min: 0, max: 16, step: 0.5, unit: "px", off: 0 },
+  scale: { label: "Scale from", min: 0.85, max: 1, step: 0.005, off: 1 },
+  shutter: { label: "Motion blur", min: 0, max: 40, step: 1, unit: "ms", off: 0, time: "duration" },
+  feather: { label: "Wipe edge", min: 8, max: 240, step: 4, unit: "px", off: 0 },
+} as const
 
-// How far through the switch the new question is fully shown, and the old one fully gone.
-const fadeIn = motionTuning.number("question.fade-in", {
-  label: "Fade in by",
-  group,
-  subsection,
-  value: 0.35,
-  min: 0.05,
-  max: 1,
-  step: 0.05,
-})
+type Tuning = Record<keyof typeof ranges, () => number> & { spring: () => DurationOptions }
 
-const fadeOut = motionTuning.number("question.fade-out", {
-  label: "Fade out by",
-  group,
-  subsection,
-  value: 0.5,
-  min: 0.05,
-  max: 1,
-  step: 0.05,
-})
+const variants: Record<Style, Tuning> = {
+  morph: variant("morph", 0.5, { launch: 0.3, travel: 0, fadeIn: 0.45, fadeOut: 0.6, blur: 6, scale: 0.97 }),
+  slide: variant("slide", 0.4, { launch: 0.5, travel: 12, fadeIn: 0.45, fadeOut: 0.6, blur: 5, shutter: 12 }),
+  wipe: variant("wipe", 0.45, { launch: 0.4, travel: 0, fadeIn: 0.8, fadeOut: 0.8, blur: 0, feather: 96 }),
+}
 
-// A switch starts at this multiple of the spring's natural speed instead of from rest, so it answers the key at once;
-// at 1 it eases out like an exponential, and up to 1 it never overshoots.
-const launch = motionTuning.number("question.launch", {
-  label: "Launch speed",
-  group,
-  subsection,
-  value: 1,
-  min: 0,
-  max: 1,
-  step: 0.05,
-})
+function variant(name: Style, duration: number, values: Partial<Record<keyof typeof ranges, number>>): Tuning {
+  const meta = { group, subsection, target, when: () => style() === name }
+
+  const spring = motionTuning.spring(`question.${name}.switch`, {
+    label: "Switch",
+    ...meta,
+    shipped: "smooth",
+    presets: {
+      snappy: { duration: duration * 0.75, bounce: 0 },
+      smooth: { duration, bounce: 0 },
+      calm: { duration: duration * 1.3, bounce: 0 },
+    },
+  })
+
+  const knobs = Object.entries(ranges).map(([key, range]) => {
+    // SAFETY: `key` comes from the entries of `ranges`.
+    const value = values[key as keyof typeof ranges]
+
+    if (value === undefined) return [key, () => range.off]
+
+    return [key, motionTuning.number(`question.${name}.${key}`, { ...range, ...meta, value })]
+  })
+
+  // SAFETY: one entry for every key of `ranges`.
+  return { spring, ...Object.fromEntries(knobs) } as Tuning
+}
 
 const fade: DurationOptions = { duration: 0.2, bounce: 0 }
 
 const minimizing: DurationOptions = { duration: 0.3, bounce: 0 }
 
-// Where a copy of the question sits on screen, relative to its place at rest.
-type Pose = { x: number; opacity: number }
+// Where a copy of the question sits on screen relative to its place at rest, how much of it shows, and how close it is
+// to sharp and full size.
+type Pose = { x: number; shown: number; settle: number }
 
-const rest: Pose = { x: 0, opacity: 1 }
+const rest: Pose = { x: 0, shown: 1, settle: 1 }
 
 // A copy of the question on its way somewhere: it set off from `from` toward the offset `to`, and its spring runs from 0
-// to 1 along the way.
-type Track = { from: Pose; to: number; spring: Spring }
+// to 1 along the way. `side` is the side of the card it comes from or goes to.
+type Track = { from: Pose; to: number; side: number; spring: Spring }
 
 // The question being left: inert copies of its text and its answers, and how tall they are.
 type Ghost = Track & { tab: number; els: HTMLElement[]; details: number; list: number }
@@ -226,6 +243,9 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
   let customRow: HTMLDivElement | undefined
   let highlightRef: HTMLSpanElement | undefined
   let customInput: HTMLInputElement | undefined
+  let liveStreak: SVGFEGaussianBlurElement | undefined
+  let ghostStreak: SVGFEGaussianBlurElement | undefined
+  const filters = { live: createUniqueId(), ghost: createUniqueId() }
   let optsRef: HTMLButtonElement[] = []
   let replied = false
 
@@ -673,10 +693,10 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
     jump(store.tab - 1)
   }
 
-  // Switching questions: the question being left is copied into a still, inert ghost over its place, which slides out
-  // toward the side it is left on and fades, while the live text and answers, now showing the new question, slide in
-  // from the other side. The ghost fades out only as the new question fades in, so the card is never empty. Under
-  // reduced motion they only cross-fade.
+  // Switching questions: the question being left is copied into a still, inert ghost over its place, while the live
+  // text and answers show the new question. The chosen style then moves both on one spring: the ghost leaves toward
+  // the side it is left on and the new question arrives from the other. The ghost is gone only once the new question
+  // has fully arrived, so the card is never empty.
   //
   // A key pressed mid-switch carries on from what is on screen, at the speed it is moving. Going back to the question
   // still leaving brings that copy back from where it is, while the live one turns into the leaving ghost. Going on to
@@ -684,25 +704,31 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
   // comes in.
   const depart = (tab: number) => {
     if (!detailsRef || !listRef || !detailsFrame || !optionsTrack) return
-    const reduced = prefersReducedMotion()
+    const v = variants[style()]
     const step = Math.sign(tab - store.tab)
     const dir = root?.matches(":dir(rtl)") ? -step : step
-    const reach = reduced ? 0 : travel()
-    const options = reduced ? fade : slide()
-    const live = into ? arriving(into) : rest
+    const reach = v.travel()
+    const options = v.spring()
+    const live = into ? arriving(into, v) : rest
     const moving = into ? speed(into) : 0
     const back = ghost?.tab === tab ? ghost : undefined
-    const kept = !back && ghost && leaving(ghost).opacity > live.opacity ? ghost : undefined
+    const kept = !back && ghost && leaving(ghost, v).shown > live.shown ? ghost : undefined
 
     if (ghost && ghost !== kept) ghost.els.forEach((el) => el.remove())
-    ghost = kept ?? {
-      ...track(live, -dir * reach, moving, options),
-      tab: store.tab,
-      els: [copy(detailsRef, detailsFrame), copy(listRef, optionsTrack)],
-      details: content.details,
-      list: content.list,
-    }
-    into = back ? track(leaving(back), 0, speed(back), options) : track({ x: dir * reach, opacity: 0 }, 0, 0, options)
+    // A kept ghost leaves on the new switch's spring from where it is, so it fades no faster than the next question
+    // arrives.
+    ghost = kept
+      ? { ...kept, ...track(leaving(kept, v), kept.to, kept.side, speed(kept), options, v.launch()) }
+      : {
+          ...track(live, -dir * reach, -dir, moving, options, v.launch()),
+          tab: store.tab,
+          els: [copy(detailsRef, detailsFrame), copy(listRef, optionsTrack)],
+          details: content.details,
+          list: content.list,
+        }
+    into = back
+      ? track(leaving(back, v), 0, dir, speed(back), options, v.launch())
+      : track({ x: dir * reach, shown: 0, settle: 0 }, 0, dir, 0, options, v.launch())
   }
 
   const dropSwitch = () => {
@@ -712,15 +738,21 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
   }
 
   const paint = () => {
-    const live = into ? arriving(into) : rest
-
+    const name = style()
+    const v = variants[name]
     const sliding = !!(into || ghost)
 
-    ;[detailsRef, listRef].forEach((el) => el && place(el, live))
+    const live = look(name, v, into ? arriving(into, v) : rest, into?.side ?? 0, into ? speed(into) : 0)
+
+    ;[detailsRef, listRef].forEach((el) => el && place(el, live, filters.live))
+
+    if (live.streak) liveStreak?.setAttribute("stdDeviation", `${live.blur.toFixed(2)} 0`)
 
     if (ghost) {
-      const pose = leaving(ghost)
-      ghost.els.forEach((el) => place(el, pose))
+      const pose = look(name, v, leaving(ghost, v), ghost.side, speed(ghost))
+      ghost.els.forEach((el) => place(el, pose, filters.ghost))
+
+      if (pose.streak) ghostStreak?.setAttribute("stdDeviation", `${pose.blur.toFixed(2)} 0`)
     }
 
     const folded = Math.max(0, Math.min(1, boxes.folded.value))
@@ -758,7 +790,7 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
 
     if (into?.spring.resting) into = undefined
 
-    if (ghost && (ghost.spring.value >= fadeOut() || ghost.spring.resting)) {
+    if (ghost && (ghost.spring.value >= variants[style()].fadeOut() || ghost.spring.resting)) {
       ghost.els.forEach((el) => el.remove())
       ghost = undefined
     }
@@ -788,7 +820,7 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
 
   const jump = (tab: number) => {
     if (sending() || tab === store.tab) return
-    const animate = !store.minimized
+    const animate = !store.minimized && !prefersReducedMotion()
 
     if (animate) depart(tab)
     else dropSwitch()
@@ -800,13 +832,14 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
       setStore("editing", false)
     })
     optsRef.length = options().length
-    // The first frame is painted now, so the new question never shows at rest before it slides in.
+    // The first frame is painted now, so the new question never shows at rest before it arrives.
     paint()
 
-    if (!animate) return
+    if (store.minimized) return
     // The answers box is still springing to the new list's height, so focusing must not scroll it.
     focus(pickFocus(tab), { preventScroll: true })
-    wake()
+
+    if (animate) wake()
   }
 
   const cycle = (by: number) => {
@@ -855,6 +888,15 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
 
   return (
     <div data-component="session-question-dock">
+      {/* Blur along the way the two copies slide, for the blur slide. */}
+      <svg data-slot="question-filters" aria-hidden="true" width="0" height="0" style={{ position: "absolute" }}>
+        <filter id={filters.live} x="-10%" y="0" width="120%" height="100%" color-interpolation-filters="sRGB">
+          <feGaussianBlur ref={(el) => (liveStreak = el)} stdDeviation="0 0" />
+        </filter>
+        <filter id={filters.ghost} x="-10%" y="0" width="120%" height="100%" color-interpolation-filters="sRGB">
+          <feGaussianBlur ref={(el) => (ghostStreak = el)} stdDeviation="0 0" />
+        </filter>
+      </svg>
       <DockPrompt
         kind="question"
         ref={(el) => (root = el)}
@@ -1083,24 +1125,32 @@ export const SessionQuestionDock: Component<{ request: FormInfo; onSubmit: () =>
   )
 }
 
-// Comes into place from where it set off, fully shown by the fade-in point.
-function arriving(track: Track): Pose {
-  const p = track.spring.value
+// Comes into place from where it set off, fully shown by the fade-in point, which is never after the fade-out point, so
+// the two copies together always show at least one whole question. It sharpens and grows over the whole spring.
+function arriving(track: Track, v: Tuning): Pose {
+  const p = unit(track.spring.value)
 
   return {
     x: track.from.x + (track.to - track.from.x) * p,
-    opacity: track.from.opacity + (1 - track.from.opacity) * Math.max(0, Math.min(1, p / fadeIn())),
+    shown: track.from.shown + (1 - track.from.shown) * unit(p / Math.min(v.fadeIn(), v.fadeOut())),
+    settle: track.from.settle + (1 - track.from.settle) * p,
   }
 }
 
 // Leaves from where it set off, fully gone by the fade-out point.
-function leaving(track: Track): Pose {
-  const p = track.spring.value
+function leaving(track: Track, v: Tuning): Pose {
+  const p = unit(track.spring.value)
+  const gone = unit(p / v.fadeOut())
 
   return {
     x: track.from.x + (track.to - track.from.x) * p,
-    opacity: track.from.opacity * Math.max(0, Math.min(1, 1 - p / fadeOut())),
+    shown: track.from.shown * (1 - gone),
+    settle: track.from.settle * (1 - gone),
   }
+}
+
+function unit(value: number) {
+  return Math.max(0, Math.min(1, value))
 }
 
 function speed(track: Track) {
@@ -1109,12 +1159,45 @@ function speed(track: Track) {
 
 // Sets off from `from` at the speed it already had on screen, plus the key's launch. The start is capped at the
 // spring's natural speed so it never overshoots its place.
-function track(from: Pose, to: number, moving: number, options: DurationOptions): Track {
+function track(from: Pose, to: number, side: number, moving: number, options: DurationOptions, launch: number): Track {
   const spring = Spring.fromDuration(0, options)
   const distance = to - from.x
   const carried = Math.abs(distance) < 0.5 ? 0 : moving / distance
 
-  return { from, to, spring: spring.set(1, { velocity: Math.min(spring.omega, carried + spring.omega * launch()) }) }
+  return {
+    from,
+    to,
+    side,
+    spring: spring.set(1, { velocity: Math.min(spring.omega, carried + spring.omega * launch) }),
+  }
+}
+
+type Look = { transform: string; opacity: string; blur: number; streak: boolean; mask: string }
+
+// How a copy in `pose` is drawn in a style. A: it blurs and shrinks toward the top as it goes. B: it blurs along the
+// way it slides, more the faster it moves. C: it shows only on its side of the sweeping edge.
+function look(name: Style, v: Tuning, pose: Pose, side: number, speed: number): Look {
+  const unsettled = 1 - pose.settle
+  const scale = 1 - (1 - v.scale()) * unsettled
+  const blur = v.blur() * unsettled + (Math.abs(speed) * v.shutter()) / 1000
+  const moved = Math.abs(pose.x) >= 0.01 || scale < 0.9999
+
+  return {
+    transform: moved ? `translate3d(${pose.x.toFixed(2)}px,0,0) scale(${scale.toFixed(4)})` : "",
+    opacity: name === "wipe" || pose.shown >= 1 ? "" : pose.shown.toFixed(4),
+    blur: blur < 0.05 ? 0 : blur,
+    streak: name === "slide",
+    mask: name === "wipe" && pose.shown < 1 ? sweep(pose.shown, side, v.feather()) : "",
+  }
+}
+
+// Shows `shown` of the width from the `side` edge, fading out over `feather` pixels past it. Two copies on opposite
+// sides whose shares add up to one fade across the same band, so together they cover the card exactly once.
+function sweep(shown: number, side: number, feather: number) {
+  const hidden = 1 - shown
+  const start = hidden * feather - feather
+
+  return `linear-gradient(${side < 0 ? "to left" : "to right"}, transparent calc(${(hidden * 100).toFixed(3)}% + ${start.toFixed(2)}px), #000 calc(${(hidden * 100).toFixed(3)}% + ${(hidden * feather).toFixed(2)}px))`
 }
 
 function tune(spring: Spring, options: DurationOptions) {
@@ -1124,9 +1207,11 @@ function tune(spring: Spring, options: DurationOptions) {
   return spring
 }
 
-function place(el: HTMLElement, pose: Pose) {
-  el.style.transform = pose.x ? `translate3d(${pose.x.toFixed(2)}px,0,0)` : ""
-  el.style.opacity = pose.opacity < 1 ? pose.opacity.toFixed(4) : ""
+function place(el: HTMLElement, look: Look, filter: string) {
+  el.style.transform = look.transform
+  el.style.opacity = look.opacity
+  el.style.filter = look.blur === 0 ? "" : look.streak ? `url(#${filter})` : `blur(${look.blur.toFixed(2)}px)`
+  el.style.setProperty("mask-image", look.mask)
 }
 
 // While a switch is under way, content sliding into a box's side gutters fades out there. While a box is shorter than

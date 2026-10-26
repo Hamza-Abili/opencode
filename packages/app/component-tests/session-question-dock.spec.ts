@@ -1,5 +1,5 @@
 import { expect, story } from "../../stories/playwright/story"
-import type { Locator } from "@playwright/test"
+import type { Locator, Page } from "@playwright/test"
 
 story("resizes the dock to fit different answer counts", async ({ mount }) => {
   const component = await mount("app-current-session-surface--question-answer-counts")
@@ -204,8 +204,8 @@ story("switches questions with Left and Right outside the text field", async ({ 
 })
 
 // Presses each key after waiting its number of frames, and samples every frame until the switch is at rest: how visible
-// the copies of the question text and of the answers are together, how many outgoing copies there are, and where the
-// live question text sits.
+// the copies of the question text and of the answers are together, how many outgoing copies there are, and how the
+// live question text is moved, scaled, blurred and masked.
 const play = (question: Locator, keys: { key: string; after?: number }[]) =>
   question.evaluate(async (root, keys) => {
     const opacity = (el: Element) => {
@@ -227,7 +227,16 @@ const play = (question: Locator, keys: { key: string; after?: number }[]) =>
         new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
       )
 
-    const frames: { text: number; answers: number; ghosts: number; x: number }[] = []
+    const frames: {
+      text: number
+      answers: number
+      ghosts: number
+      x: number
+      scale: number
+      blur: boolean
+      mask: boolean
+    }[] = []
+
     const queue = [...keys]
     let wait = 0
     let still = 0
@@ -243,13 +252,23 @@ const play = (question: Locator, keys: { key: string; after?: number }[]) =>
         wait--
         const el = live()
         const style = el ? getComputedStyle(el) : undefined
-        frames.push({
+        const matrix = new DOMMatrix(style?.transform === "none" ? undefined : style?.transform)
+
+        const frame = {
           text: shown("question-details"),
           answers: shown("question-options-list"),
           ghosts: root.querySelectorAll("[data-ghost]").length,
-          x: style ? new DOMMatrix(style.transform).m41 : 0,
-        })
-        const resting = queue.length === 0 && frames.at(-1)!.ghosts === 0 && style?.transform === "none"
+          x: matrix.m41,
+          scale: matrix.m11,
+          blur: (style?.filter ?? "none") !== "none",
+          mask: (style?.maskImage ?? "none") !== "none",
+        }
+
+        frames.push(frame)
+
+        const resting =
+          queue.length === 0 && frame.ghosts === 0 && style?.transform === "none" && !frame.blur && !frame.mask
+
         still = resting ? still + 1 : 0
 
         if (still >= 3 || frames.length >= 240) return resolve()
@@ -262,58 +281,93 @@ const play = (question: Locator, keys: { key: string; after?: number }[]) =>
     return frames
   }, keys)
 
-story("keeps a question on screen and slides toward the trailing side while switching", async ({ mount }) => {
-  const component = await mount("app-current-session-surface--question-request")
-  const question = component.locator('[data-component="dock-prompt"][data-kind="question"]')
-  await expect(question.getByRole("radio", { name: /Focused/ })).toBeFocused()
+// The switch styles in the order of their knob's options, which is how a saved choice names them.
+const styles = ["morph", "slide", "wipe"] as const
 
-  const forward = await play(question, [{ key: "ArrowRight" }])
-  await expect(question.getByRole("checkbox", { name: "Changed files", exact: true })).toBeVisible()
-  expect(forward.length).toBeLessThan(240)
-  expect(Math.min(...forward.map((frame) => frame.text))).toBeGreaterThanOrEqual(0.9)
-  expect(Math.min(...forward.map((frame) => frame.answers))).toBeGreaterThanOrEqual(0.9)
-  expect(Math.max(...forward.map((frame) => frame.x))).toBeGreaterThan(0)
-  expect(forward.at(-1)?.x).toBe(0)
+const choose = (page: Page, name: (typeof styles)[number]) =>
+  page.addInitScript(
+    (value) => localStorage.setItem("opencode.motion.v2", value),
+    JSON.stringify({ "question.style": styles.indexOf(name) }),
+  )
 
-  const backward = await play(question, [{ key: "ArrowLeft" }])
-  await expect(question.getByRole("radio", { name: /Focused/ })).toBeVisible()
-  expect(backward.length).toBeLessThan(240)
-  expect(Math.min(...backward.map((frame) => frame.text))).toBeGreaterThanOrEqual(0.9)
-  expect(Math.min(...backward.map((frame) => frame.answers))).toBeGreaterThanOrEqual(0.9)
-  expect(Math.min(...backward.map((frame) => frame.x))).toBeLessThan(0)
-  await expect(question.locator("[data-ghost]")).toHaveCount(0)
-})
+for (const name of styles)
+  story(`keeps a question on screen while switching (${name})`, async ({ mount, page }) => {
+    await choose(page, name)
+    const component = await mount("app-current-session-surface--question-request")
+    const question = component.locator('[data-component="dock-prompt"][data-kind="question"]')
+    await expect(question.getByRole("radio", { name: /Focused/ })).toBeFocused()
 
-story("keeps one outgoing copy and a visible question through rapid switches", async ({ mount }) => {
-  const component = await mount("app-current-session-surface--question-series")
-  const question = component.locator('[data-component="dock-prompt"][data-kind="question"]')
-  const options = question.locator('[data-slot="question-options"]')
-  await expect(question.getByRole("radio").first()).toBeFocused()
-  // From the middle question, so every run can go two either way and comes back.
-  await play(question, [{ key: "ArrowRight" }, { key: "ArrowRight", after: 30 }])
+    const forward = await play(question, [{ key: "ArrowRight" }])
+    await expect(question.getByRole("checkbox", { name: "Changed files", exact: true })).toBeVisible()
+    const backward = await play(question, [{ key: "ArrowLeft" }])
+    await expect(question.getByRole("radio", { name: /Focused/ })).toBeVisible()
+    await expect(question.locator("[data-ghost]")).toHaveCount(0)
 
-  const runs = [
-    ["ArrowRight", "ArrowLeft"],
-    ["ArrowLeft", "ArrowRight"],
-    ["ArrowRight", "ArrowRight", "ArrowLeft", "ArrowLeft"],
-    ["ArrowLeft", "ArrowLeft", "ArrowRight", "ArrowRight"],
-  ]
-
-  for (const run of runs)
-    for (const after of [0, 1, 2, 4]) {
-      const frames = await play(
-        question,
-        run.map((key) => ({ key, after })),
-      )
-
-      const label = `${run.join(" ")} every ${after} frames`
-      expect(frames.length, label).toBeLessThan(240)
-      expect(Math.min(...frames.map((frame) => frame.text)), label).toBeGreaterThanOrEqual(0.5)
-      expect(Math.min(...frames.map((frame) => frame.answers)), label).toBeGreaterThanOrEqual(0.5)
-      expect(Math.max(...frames.map((frame) => frame.ghosts)), label).toBeLessThanOrEqual(2)
-      await expect(question.locator("[data-ghost]")).toHaveCount(0)
-      expect(await options.evaluate((el) => el.scrollLeft), label).toBe(0)
+    for (const frames of [forward, backward]) {
+      expect(frames.length).toBeLessThan(240)
+      expect(Math.min(...frames.map((frame) => frame.text))).toBeGreaterThanOrEqual(0.9)
+      expect(Math.min(...frames.map((frame) => frame.answers))).toBeGreaterThanOrEqual(0.9)
+      expect(frames.at(-1)).toMatchObject({ x: 0, scale: 1, blur: false, mask: false })
     }
+
+    if (name === "morph") {
+      expect(Math.min(...forward.map((frame) => frame.scale))).toBeLessThan(1)
+      expect(forward.some((frame) => frame.blur)).toBe(true)
+    }
+
+    if (name === "slide") {
+      // Forward comes in from the trailing side, and back from the leading one.
+      expect(Math.max(...forward.map((frame) => frame.x))).toBeGreaterThan(0)
+      expect(Math.min(...backward.map((frame) => frame.x))).toBeLessThan(0)
+      expect(forward.some((frame) => frame.blur)).toBe(true)
+    }
+
+    if (name === "wipe") expect(forward.some((frame) => frame.mask)).toBe(true)
+  })
+
+for (const name of styles)
+  story(`keeps one outgoing copy and a visible question through rapid switches (${name})`, async ({ mount, page }) => {
+    await choose(page, name)
+    const component = await mount("session-question-switch--question-series")
+    const question = component.locator('[data-component="dock-prompt"][data-kind="question"]')
+    const options = question.locator('[data-slot="question-options"]')
+    await expect(question.getByRole("radio").first()).toBeFocused()
+    // From the middle question, so every run can go two either way and comes back.
+    await play(question, [{ key: "ArrowRight" }, { key: "ArrowRight", after: 30 }])
+
+    const runs = [
+      ["ArrowRight", "ArrowLeft"],
+      ["ArrowLeft", "ArrowRight"],
+      ["ArrowRight", "ArrowRight", "ArrowLeft", "ArrowLeft"],
+      ["ArrowLeft", "ArrowLeft", "ArrowRight", "ArrowRight"],
+    ]
+
+    for (const run of runs)
+      for (const after of [0, 1, 2, 4]) {
+        const frames = await play(
+          question,
+          run.map((key) => ({ key, after })),
+        )
+
+        const label = `${run.join(" ")} every ${after} frames`
+        expect(frames.length, label).toBeLessThan(240)
+        expect(Math.min(...frames.map((frame) => frame.text)), label).toBeGreaterThanOrEqual(0.5)
+        expect(Math.min(...frames.map((frame) => frame.answers)), label).toBeGreaterThanOrEqual(0.5)
+        expect(Math.max(...frames.map((frame) => frame.ghosts)), label).toBeLessThanOrEqual(2)
+        await expect(question.locator("[data-ghost]")).toHaveCount(0)
+        expect(await options.evaluate((el) => el.scrollLeft), label).toBe(0)
+      }
+  })
+
+story("swaps questions at once under reduced motion", async ({ mount, page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" })
+  const component = await mount("session-question-switch--question-series")
+  const question = component.locator('[data-component="dock-prompt"][data-kind="question"]')
+  await expect(question.getByRole("radio").first()).toBeFocused()
+
+  const frames = await play(question, [{ key: "ArrowRight" }])
+  expect(frames.every((frame) => frame.ghosts === 0 && frame.x === 0 && frame.scale === 1 && !frame.blur)).toBe(true)
+  expect(Math.min(...frames.map((frame) => frame.text))).toBe(1)
 })
 
 story("toggles checkboxes with Space on key down and moves focus with arrows", async ({ mount, page }) => {
