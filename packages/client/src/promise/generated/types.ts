@@ -200,7 +200,7 @@ export type GenerateScoreAnswer = {
   confidence: number
 }
 
-export type GenerateErrorAnswer = { type: "error"; name: string; reason: "refusal" }
+export type GenerateErrorAnswer = { type: "error"; name: string; reason: string; message?: string }
 
 export type VoiceTransportType = "webrtc" | "websocket"
 

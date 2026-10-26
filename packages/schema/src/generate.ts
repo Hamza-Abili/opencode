@@ -169,10 +169,11 @@ export interface ErrorAnswer extends Schema.Schema.Type<typeof ErrorAnswer> {}
 export const ErrorAnswer = Schema.Struct({
   type: Schema.Literal("error"),
   name: Schema.String,
-  reason: Schema.Literal("refusal"),
+  reason: Schema.String.annotate(description("Why the question has no answer, for example refusal")),
+  message: Schema.String.pipe(optional),
 }).annotate({
   identifier: "Generate.ErrorAnswer",
-  description: "The provider declined this one question; the other answers still came back",
+  description: "This one question has no answer; the other answers still came back",
 })
 
 export type DecisionAnswer = PredicateAnswer | ChoiceAnswer | ScoreAnswer | ErrorAnswer

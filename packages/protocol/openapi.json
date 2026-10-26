@@ -17100,12 +17100,15 @@
           },
           "reason": {
             "type": "string",
-            "enum": ["refusal"]
+            "description": "Why the question has no answer, for example refusal"
+          },
+          "message": {
+            "type": "string"
           }
         },
         "required": ["type", "name", "reason"],
         "additionalProperties": false,
-        "description": "The provider declined this one question; the other answers still came back"
+        "description": "This one question has no answer; the other answers still came back"
       },
       "Generate.File": {
         "type": "object",
