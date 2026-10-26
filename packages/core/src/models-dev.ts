@@ -1,5 +1,7 @@
 import { Cause, Context, Duration, Effect, Layer, Option, Schedule, Schema, Semaphore } from "effect"
 import { HttpClient, HttpClientError, HttpClientRequest } from "effect/http"
+import { ConfigProvider } from "@opencode/schema/config/provider"
+import { MaxTokensField } from "@opencode/schema/model-compatibility"
 import { ModelsDev } from "@opencode/schema/models-dev"
 import { Money } from "@opencode/schema/money"
 import { App } from "./app.js"
@@ -15,140 +17,228 @@ import { Variant } from "./variant.js"
 import { KV } from "./kv.js"
 import snapshotText from "./models-dev/snapshot.txt" with { type: "text" }
 
-export const CatalogModelStatus = Schema.Literals(["alpha", "beta", "deprecated"])
-export type CatalogModelStatus = typeof CatalogModelStatus.Type
-
-// models.dev treats a model without a type as a chat model.
-export const CatalogModelType = Schema.Literals([
-  "chat",
-  "image",
-  "video",
-  "embedding",
-  "reranking",
-  "decision",
-  "transcription",
-  "speech",
-  "realtime",
+// Only the fields opencode reads are decoded. Unknown keys are ignored, and a model that
+// doesn't match is skipped rather than failing the whole catalog.
+const Price = Money.USDPerMillionTokens
+const CacheWrite = Schema.Union([Price, Schema.Record(Schema.String, Price)])
+const CachePrices = Schema.Struct({
+  read: Schema.optional(Price),
+  write: Schema.optional(CacheWrite),
+  explicit: Schema.optional(Schema.Struct({ write: Schema.optional(CacheWrite) })),
+})
+const When = Schema.Record(Schema.String, Schema.Unknown)
+// A number scales every price below it; an object scales only the prices it names.
+type Factor = number | { readonly [key: string]: Factor }
+const Factor: Schema.Codec<Factor> = Schema.Union([
+  Schema.Finite,
+  Schema.Record(
+    Schema.String,
+    Schema.suspend((): Schema.Codec<Factor> => Factor),
+  ),
 ])
-export type CatalogModelType = typeof CatalogModelType.Type
+const SourceCost = Schema.Struct({
+  text: Schema.optional(
+    Schema.Struct({
+      input: Schema.optional(
+        Schema.Struct({
+          unit: Schema.optional(Schema.String),
+          price: Price,
+          cache: Schema.optional(CachePrices),
+          overrides: Schema.optional(
+            Schema.Array(
+              Schema.Struct({ when: When, price: Schema.optional(Price), cache: Schema.optional(CachePrices) }),
+            ),
+          ),
+        }),
+      ),
+      output: Schema.optional(
+        Schema.Struct({
+          unit: Schema.optional(Schema.String),
+          price: Price,
+          overrides: Schema.optional(Schema.Array(Schema.Struct({ when: When, price: Schema.optional(Price) }))),
+        }),
+      ),
+    }),
+  ),
+  multipliers: Schema.optional(Schema.Array(Schema.Struct({ when: When, factor: Factor }))),
+})
+type SourceCost = typeof SourceCost.Type
 
-type Cost = {
-  readonly input: Money.USDPerMillionTokens
-  readonly output: Money.USDPerMillionTokens
-  readonly cache_read?: Money.USDPerMillionTokens
-  readonly cache_write?: Money.USDPerMillionTokens
-  readonly tiers?: readonly (Cost & { readonly tier: { readonly type: "context"; readonly size: number } })[]
-}
+const SourceModel = Schema.Struct({
+  id: Schema.String,
+  type: Schema.String,
+  name: Schema.String,
+  family: Schema.optional(Schema.String),
+  release_date: Schema.String,
+  status: Schema.optional(Schema.String),
+  modalities: Schema.Struct({ input: Schema.Array(Schema.String), output: Schema.Array(Schema.String) }),
+  capabilities: Schema.Struct({
+    tools: Schema.Struct({ supported: Schema.Boolean }),
+    reasoning: ConfigProvider.Reasoning,
+    temperature: Schema.optional(Schema.Boolean),
+  }),
+  limit: Schema.optional(
+    Schema.Struct({
+      context: Schema.optional(Schema.Finite),
+      input: Schema.optional(Schema.Finite),
+      output: Schema.optional(Schema.Finite),
+    }),
+  ),
+  cost: Schema.optional(SourceCost),
+  // Ordered: the first API is the model's default.
+  api: Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      base_url: Schema.String,
+      sdk: Schema.optional(
+        Schema.Struct({ aisdk: Schema.optional(Schema.String), opencodeai: Schema.optional(Schema.String) }),
+      ),
+      compatibility: Schema.optional(
+        Schema.Struct({
+          reasoning_field: Schema.optional(Schema.String),
+          max_tokens_field: Schema.optional(Schema.String),
+        }),
+      ),
+    }),
+  ),
+  experimental: Schema.optional(
+    Schema.Struct({
+      modes: Schema.optional(
+        Schema.Record(
+          Schema.String,
+          Schema.Struct({
+            service_tier: Schema.optional(Schema.String),
+            cost: Schema.optional(SourceCost),
+            body: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+            headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+          }),
+        ),
+      ),
+    }),
+  ),
+})
+type SourceModel = typeof SourceModel.Type
 
-type Modality = "text" | "audio" | "image" | "video" | "pdf"
+const SourceProvider = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  env: Schema.Array(Schema.String),
+  models: Schema.Record(Schema.String, Schema.Unknown),
+})
 
-type SourceModel = {
-  readonly id: string
-  readonly name: string
-  readonly type?: CatalogModelType
-  readonly family?: string
-  readonly release_date: string
-  readonly attachment: boolean
-  readonly reasoning: boolean
-  readonly reasoning_options?: readonly (
-    | { readonly type: "effort"; readonly values: readonly (string | null)[] }
-    | Exclude<Variant.Support, { type: "effort" }>
-  )[]
-  readonly temperature?: boolean
-  readonly tool_call: boolean
-  readonly interleaved?: boolean | string | { readonly field: string }
-  readonly cost?: Cost
-  readonly limit: { readonly context: number; readonly input?: number; readonly output: number }
-  readonly modalities?: { readonly input: readonly Modality[]; readonly output: readonly Modality[] }
-  readonly experimental?: {
-    readonly modes?: Readonly<
-      Record<
-        string,
-        {
-          readonly cost?: Cost
-          readonly provider?: {
-            readonly body?: Provider.Settings
-            readonly headers?: Readonly<Record<string, string>>
-          }
-        }
-      >
-    >
-  }
-  readonly status?: CatalogModelStatus
-  readonly provider?: {
-    readonly npm?: string
-    readonly api?: string
-    readonly shape?: "responses" | "completions"
-  }
-}
-
-type SourceProvider = {
-  readonly api?: string
-  readonly name: string
-  readonly env: readonly string[]
-  readonly id: string
-  readonly npm: string
-  readonly models: Readonly<Record<string, SourceModel>>
-}
+const ContextCondition = Schema.Struct({ gt: Schema.optional(Schema.Finite), gte: Schema.optional(Schema.Finite) })
+const decodeModel = Schema.decodeUnknownOption(SourceModel)
+const decodeProvider = Schema.decodeUnknownOption(SourceProvider)
+const decodeContext = Schema.decodeUnknownOption(ContextCondition)
+const decodeMaxTokensField = Schema.decodeUnknownOption(MaxTokensField)
+const decodeStatus = Schema.decodeUnknownOption(Schema.Literals(["alpha", "beta", "deprecated"]))
 
 export type Snapshot = {
   readonly info: Provider.Info
   readonly models: readonly Model.Info[]
   readonly environment: readonly string[]
-  /** The models.dev type of each typed model, by catalog model ID. */
-  readonly types?: ReadonlyMap<Model.ID, CatalogModelType>
 }
 
-function nativePackage(provider: SourceProvider, model?: SourceModel) {
-  const npm = model?.provider?.npm ?? provider.npm
-  return (
-    AISDKNative.native(npm, {
-      providerID: provider.id,
-      modelID: model?.id,
-      shape: model?.provider?.shape,
-    }) ?? Provider.aisdk(npm)
-  )
+type Route = {
+  readonly package: string
+  readonly baseURL?: string
+  readonly compatibility?: Model.Compatibility
 }
 
-function normalize(input: Record<string, SourceProvider>): readonly Snapshot[] {
-  const providers: Snapshot[] = []
-  for (const item of Object.values(input)) {
+// These packages build their URL from provider settings (region, resource, account, project…), which
+// only happens when no baseURL is set. The catalog's URL for them is a template or SDK default.
+const BUILDS_OWN_URL = new Set([
+  "@opencode/ai/providers/amazon-bedrock",
+  "@opencode/ai/providers/azure/chat",
+  "@opencode/ai/providers/azure/responses",
+  "@opencode/ai/providers/cloudflare-ai-gateway",
+  "@opencode/ai/providers/cloudflare-workers-ai",
+  "@opencode/ai/providers/google-vertex/gemini",
+  "@opencode/ai/providers/google-vertex/messages",
+  "aisdk:@jerome-benoit/sap-ai-provider-v2",
+  "aisdk:watsonx-ai-provider",
+])
+
+function normalize(input: Record<string, unknown>): readonly Snapshot[] {
+  return Object.values(input).flatMap((value) => {
+    const item = Option.getOrUndefined(decodeProvider(value))
+    if (!item) return []
     const providerID = Provider.ID.make(item.id)
-    const packageName = nativePackage(item)
+    const sources = Object.values(item.models).flatMap((value) => {
+      const model = Option.getOrUndefined(decodeModel(value))
+      const target = model && route(providerID, model)
+      return model && target ? [{ model, route: target }] : []
+    })
+    // v2 lists APIs per model, so the provider defaults are what most of its models use. A model that
+    // builds its own URL would inherit a provider baseURL, so then every model carries its own instead.
+    const packageName = mostCommon(sources.map((source) => source.route.package)) ?? ""
+    const urls = sources.map((source) => source.route.baseURL)
+    const baseURL = urls.every((url) => url !== undefined) ? mostCommon(urls) : undefined
     const info = {
       id: providerID,
       name: item.name,
       activation: "auto",
       package: packageName,
-      ...(item.api && packageName !== "@opencode/ai/providers/cloudflare-workers-ai"
-        ? { settings: { baseURL: item.api } }
-        : {}),
+      ...(baseURL ? { settings: { baseURL } } : {}),
     } satisfies Provider.Info
-    const models: Model.Info[] = []
-    const types = new Map<Model.ID, CatalogModelType>()
-    for (const model of Object.values(item.models)) {
-      const baseCost = cost(model.cost)
-      const id = Model.ID.make(model.id)
-      const base = modelInfo(item, id, model, { cost: baseCost })
-      const variants = Variant.resolve({ ...base, package: nativePackage(item, model) }, supports(model))
-      models.push({ ...base, variants })
-      if (model.type) types.set(id, model.type)
-      for (const [mode, options] of Object.entries(model.experimental?.modes ?? {})) {
-        const modeID = Model.ID.make(`${model.id}-${mode}`)
-        models.push(
-          modelInfo(item, modeID, model, {
-            name: modeName(model, mode),
-            cost: mergeCost(baseCost, options.cost),
-            request: options.provider,
+    const models = sources.flatMap((source) => {
+      const baseCost = cost(source.model.cost)
+      const id = Model.ID.make(source.model.id)
+      const base = modelInfo(providerID, { packageName, baseURL }, id, source, { cost: baseCost })
+      const variants = Variant.resolve(
+        { ...base, package: source.route.package },
+        Variant.supports(source.model.capabilities.reasoning),
+      )
+      return [
+        { ...base, variants },
+        ...Object.entries(source.model.experimental?.modes ?? {}).map(([mode, options]) =>
+          modelInfo(providerID, { packageName, baseURL }, Model.ID.make(`${source.model.id}-${mode}`), source, {
+            name: `${source.model.name} ${mode.charAt(0).toUpperCase()}${mode.slice(1)}`,
+            cost: modeCost(source.model, baseCost, mode, options),
+            request: options,
             variants,
           }),
-        )
-        if (model.type) types.set(modeID, model.type)
-      }
-    }
-    providers.push({ info, models, environment: [...item.env], types })
+        ),
+      ]
+    })
+    return [{ info, models, environment: [...item.env] }]
+  })
+}
+
+function route(providerID: Provider.ID, model: SourceModel): Route | undefined {
+  // A chat model uses its first API. Other types (image, decision…) only run through opencode's own
+  // packages, so they use their first API that has one, and are skipped without one.
+  const apis = Object.entries(model.api)
+  const [protocol, api] = (model.type === "chat" ? apis[0] : apis.find(([, entry]) => entry.sdk?.opencodeai)) ?? []
+  if (!protocol || !api) return undefined
+  const aisdk = api.sdk?.aisdk
+  const packageName =
+    api.sdk?.opencodeai ??
+    (aisdk &&
+      (AISDKNative.native(aisdk, {
+        providerID,
+        modelID: model.id,
+        shape: protocol === "responses" ? "responses" : protocol === "chat-completions" ? "completions" : undefined,
+      }) ??
+        Provider.aisdk(aisdk)))
+  if (!packageName) return undefined
+  const maxTokensField = Option.getOrUndefined(decodeMaxTokensField(api.compatibility?.max_tokens_field))
+  const compatibility = {
+    ...(api.compatibility?.reasoning_field ? { reasoningField: api.compatibility.reasoning_field } : {}),
+    ...(maxTokensField ? { maxTokensField } : {}),
   }
-  return providers
+  return {
+    package: packageName,
+    // An empty base_url is how models.dev says it has no URL for the API.
+    ...(BUILDS_OWN_URL.has(packageName) || !api.base_url ? {} : { baseURL: api.base_url }),
+    ...(Object.keys(compatibility).length > 0 ? { compatibility } : {}),
+  }
+}
+
+function mostCommon<T>(values: readonly T[]) {
+  const counts = new Map<T, number>()
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1)
+  return [...counts].reduce<[T, number] | undefined>((best, entry) => (!best || entry[1] > best[1] ? entry : best), undefined)?.[0]
 }
 
 function released(date: string) {
@@ -156,104 +246,154 @@ function released(date: string) {
   return Number.isFinite(time) ? time : 0
 }
 
-function cost(input: SourceModel["cost"]): Model.Info["cost"] {
+const COMPATIBLE = new Set(["@opencode/ai/providers/openai-compatible", "@opencode/ai/providers/anthropic-compatible"])
+
+const zero = Money.USDPerMillionTokens.zero
+
+// Only per-token text prices are kept: per-image, per-second and similar prices have
+// no place in opencode's cost yet. Context overrides become tiers; other conditions
+// (service tier, time of day…) are left out.
+function cost(input: SourceCost | undefined): Model.Info["cost"] {
+  const text = input?.text
+  const perToken = (unit: string | undefined) => unit === undefined || unit === "token"
+  if (!text?.input || !text.output || !perToken(text.input.unit) || !perToken(text.output.unit))
+    return [{ input: zero, output: zero, cache: { read: zero, write: zero } }]
+  const textInput = text.input
+  const textOutput = text.output
   const base = {
-    input: input?.input ?? Money.USDPerMillionTokens.zero,
-    output: input?.output ?? Money.USDPerMillionTokens.zero,
-    cache: {
-      read: input?.cache_read ?? Money.USDPerMillionTokens.zero,
-      write: input?.cache_write ?? Money.USDPerMillionTokens.zero,
-    },
+    input: textInput.price,
+    output: textOutput.price,
+    cache: { read: textInput.cache?.read ?? zero, write: cacheWrite(textInput.cache) ?? zero },
   }
-  return [
-    base,
-    ...(input?.tiers?.map((item) => ({
-      tier: item.tier,
-      input: item.input,
-      output: item.output,
+  // An override merges field by field, so a tier keeps every base price it doesn't set.
+  const tiers = new Map<number, Model.Info["cost"][number]>()
+  const tier = (when: Record<string, unknown>) => {
+    const context = Object.keys(when).length === 1 ? Option.getOrUndefined(decodeContext(when.context)) : undefined
+    const size = context?.gt ?? context?.gte
+    if (size === undefined) return undefined
+    const entry = tiers.get(size) ?? { ...base, tier: { type: "context" as const, size } }
+    tiers.set(size, entry)
+    return entry
+  }
+  for (const override of textInput.overrides ?? []) {
+    const entry = tier(override.when)
+    if (!entry) continue
+    tiers.set(entry.tier!.size, {
+      ...entry,
+      input: override.price ?? entry.input,
       cache: {
-        read: item.cache_read ?? Money.USDPerMillionTokens.zero,
-        write: item.cache_write ?? Money.USDPerMillionTokens.zero,
+        read: override.cache?.read ?? entry.cache.read,
+        write: cacheWrite(override.cache) ?? entry.cache.write,
       },
-    })) ?? []),
-  ]
-}
-
-function mergeCost(base: Model.Info["cost"], override: SourceModel["cost"] | undefined) {
-  if (!override) return base
-  const next = cost(override)
-  const [baseDefault, ...baseTiers] = base
-  const [nextDefault, ...nextTiers] = next
-  const tierKey = (item: Model.Info["cost"][number]) => `${item.tier?.type ?? "base"}:${item.tier?.size ?? 0}`
-  const merge = (left: Model.Info["cost"][number], right: Model.Info["cost"][number]) => ({
-    ...left,
-    ...right,
-    tier: right.tier ?? left.tier,
-    cache: { ...left.cache, ...right.cache },
-  })
-  const tiers = new Map(baseTiers.map((item) => [tierKey(item), item]))
-  for (const item of nextTiers) {
-    const current = tiers.get(tierKey(item))
-    tiers.set(tierKey(item), current ? merge(current, item) : item)
+    })
   }
+  for (const override of textOutput.overrides ?? []) {
+    const entry = tier(override.when)
+    if (entry) tiers.set(entry.tier!.size, { ...entry, output: override.price ?? entry.output })
+  }
+  return [base, ...tiers.values()]
+}
+
+// opencode has one cache write price: the first TTL listed, else the explicit cache's.
+function cacheWrite(cache: typeof CachePrices.Type | undefined) {
+  const first = (write: typeof CacheWrite.Type | undefined) => (typeof write === "object" ? Object.values(write)[0] : write)
+  return first(cache?.write) ?? first(cache?.explicit?.write)
+}
+
+// A mode without its own cost takes the base prices scaled by its service tier's
+// multiplier (the mode name by default). The base context tiers are kept unscaled.
+function modeCost(
+  model: SourceModel,
+  base: Model.Info["cost"],
+  name: string,
+  mode: NonNullable<NonNullable<SourceModel["experimental"]>["modes"]>[string],
+): Model.Info["cost"] {
+  const [baseDefault, ...baseTiers] = base
+  if (mode.cost) return [cost(mode.cost)[0], ...baseTiers]
+  const tier = mode.service_tier ?? name
+  const factor = model.cost?.multipliers?.find(
+    (multiplier) =>
+      Object.keys(multiplier.when).length === 1 &&
+      Option.getOrUndefined(decodeServiceTier(multiplier.when.service_tier))?.equals === tier,
+  )?.factor
+  if (factor === undefined || !baseDefault) return base
+  const scale = (price: Money.USDPerMillionTokens, path: readonly string[]) =>
+    Money.USDPerMillionTokens.make(Math.round(price * factorAt(factor, path) * 1e10) / 1e10)
   return [
-    merge(
-      baseDefault ?? {
-        input: Money.USDPerMillionTokens.zero,
-        output: Money.USDPerMillionTokens.zero,
-        cache: { read: Money.USDPerMillionTokens.zero, write: Money.USDPerMillionTokens.zero },
+    {
+      input: scale(baseDefault.input, ["text", "input", "price"]),
+      output: scale(baseDefault.output, ["text", "output", "price"]),
+      cache: {
+        read: scale(baseDefault.cache.read, ["text", "input", "cache", "read"]),
+        write: scale(baseDefault.cache.write, ["text", "input", "cache", "write"]),
       },
-      nextDefault,
-    ),
-    ...tiers.values(),
+    },
+    ...baseTiers,
   ]
 }
 
-function modeName(model: SourceModel, mode: string) {
-  return `${model.name} ${mode.charAt(0).toUpperCase()}${mode.slice(1)}`
+const decodeServiceTier = Schema.decodeUnknownOption(Schema.Struct({ equals: Schema.optional(Schema.String) }))
+
+// Prices an object factor doesn't name keep factor 1.
+function factorAt(factor: Factor, path: readonly string[]): number {
+  const node = path.reduce<Factor | undefined>(
+    (node, key) => (node === undefined || typeof node === "number" ? node : node[key]),
+    factor,
+  )
+  if (node === undefined) return 1
+  if (typeof node === "number") return node
+  // A cache write factor is keyed by TTL; opencode keeps the first one.
+  const first = Object.values(node)[0]
+  return typeof first === "number" ? first : 1
 }
 
-function supports(model: SourceModel): readonly Variant.Support[] {
-  return (model.reasoning_options ?? []).map((option) =>
-    option.type === "effort"
-      ? { type: "effort", values: option.values.filter((value): value is string => value !== null && value !== "null") }
-      : option,
-  )
+// v2 lists exact MIME types; opencode's capabilities use the broad kind.
+function modality(value: string) {
+  if (value === "application/pdf") return "pdf"
+  const kind = value.split("/")[0]
+  return kind === "text" || kind === "image" || kind === "audio" || kind === "video" ? kind : value
+}
+
+function modalities(values: readonly string[]) {
+  return [...new Set(values.map(modality))]
 }
 
 function modelInfo(
-  provider: SourceProvider,
+  providerID: Provider.ID,
+  provider: { readonly packageName: string; readonly baseURL?: string },
   id: Model.ID,
-  model: SourceModel,
+  source: { readonly model: SourceModel; readonly route: Route },
   input: {
     readonly name?: string
     readonly cost?: Model.Info["cost"]
-    readonly request?: NonNullable<NonNullable<SourceModel["experimental"]>["modes"]>[string]["provider"]
+    readonly request?: { readonly body?: Provider.Settings; readonly headers?: Readonly<Record<string, string>> }
     readonly variants?: NonNullable<Model.Info["variants"]>
   } = {},
 ): Model.Info {
-  const providerID = Provider.ID.make(provider.id)
-  const resolved = nativePackage(provider, model)
-  const pkg = model.provider?.npm || resolved !== nativePackage(provider) ? resolved : undefined
-  // Per model, so it never merges into a model that overrides to a different package.
+  const model = source.model
+  // Per model, so it never merges into a model that overrides to a different package. Compatible
+  // packages are told the real host, so requests and saved provider state carry its ID.
   const settings = {
-    ...(model.provider?.api ? { baseURL: model.provider.api } : {}),
-    ...(resolved === "@opencode/ai/providers/openai-compatible" ? { provider: providerID } : {}),
+    ...(source.route.baseURL !== undefined && source.route.baseURL !== provider.baseURL
+      ? { baseURL: source.route.baseURL }
+      : {}),
+    ...(COMPATIBLE.has(source.route.package) ? { provider: providerID } : {}),
   }
   return {
     id,
     modelID: Model.ID.make(model.id),
     providerID,
+    type: model.type,
     name: input.name ?? model.name,
-    compatibility: Model.compatibility(model.interleaved),
+    compatibility: source.route.compatibility,
     family: model.family ? Model.Family.make(model.family) : undefined,
-    package: pkg,
+    package: source.route.package !== provider.packageName ? source.route.package : undefined,
     settings: Object.keys(settings).length === 0 ? undefined : settings,
     capabilities: {
-      tools: model.tool_call,
-      input: [...(model.modalities?.input ?? [])],
-      output: [...(model.modalities?.output ?? [])],
-      temperature: model.temperature,
+      tools: model.capabilities.tools.supported,
+      input: modalities(model.modalities.input),
+      output: modalities(model.modalities.output),
+      temperature: model.capabilities.temperature,
     },
     variants: [...(input.variants ?? [])],
     time: { released: released(model.release_date) },
@@ -262,9 +402,9 @@ function modelInfo(
       tier: item.tier && { ...item.tier },
       cache: { ...item.cache },
     })),
-    status: model.status ?? "active",
+    status: Option.getOrElse(decodeStatus(model.status), () => "active" as const),
     enabled: true,
-    limit: { context: model.limit.context, input: model.limit.input, output: model.limit.output },
+    limit: { context: model.limit?.context ?? 0, input: model.limit?.input, output: model.limit?.output ?? 0 },
     headers: input.request?.headers ? { ...input.request.headers } : undefined,
     body: input.request?.body ? { ...input.request.body } : undefined,
   }
@@ -288,8 +428,7 @@ export type Options = typeof Options.Type
 export class Service extends Context.Service<Service, Interface>()("@opencode/ModelsDev") {}
 
 const CatalogJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
-const decodeCatalog = (text: string) =>
-  Schema.decodeUnknownEffect(CatalogJson)(text).pipe(Effect.map((catalog) => catalog as Record<string, SourceProvider>))
+const decodeCatalog = (text: string) => Schema.decodeUnknownEffect(CatalogJson)(text)
 const Cache = Schema.Struct({
   updatedAt: Schema.Number,
   // Digest of the raw body, persisted so refresh() can skip republishing a
@@ -304,9 +443,12 @@ const CacheMeta = Schema.Struct({
 })
 const defaultSource = "https://models.opencode.ai"
 
+// The experimental v2 API, limited to the model types opencode keeps.
+export const catalogPath = "/experimental/v2.0/api.json?type=chat,decision,image"
+
 export const decodeSnapshot = (text: string) => decodeCatalog(text).pipe(Effect.map(normalize))
 
-// Bundled snapshot of https://models.opencode.ai/api.json, committed at
+// Bundled snapshot of the catalog at `catalogPath`, committed at
 // packages/core/src/models-dev/snapshot.txt and refreshed via
 // `bun run script/update-models-snapshot.ts`. Release builds bundle the live
 // catalog in its place when it can be fetched. Decoded and normalized once per
@@ -325,9 +467,10 @@ const bundledSnapshot = Effect.suspend(() =>
       ),
 )
 
+// Versioned so an entry cached from the v1 API is never read as v2.
 function cacheKey(source: string) {
-  if (source === defaultSource) return "models-dev:catalog"
-  return `models-dev:catalog:${Hash.fast(source)}`
+  if (source === defaultSource) return "models-dev:v2:catalog"
+  return `models-dev:v2:catalog:${Hash.fast(source)}`
 }
 
 export function bodyDigest(text: string) {
@@ -359,13 +502,16 @@ export const layer = (options?: Options) =>
       const metaKey = `${key}:meta`
       const ttl = Duration.minutes(5)
       const lock = Semaphore.makeUnsafe(1)
+      // The v1 catalog was cached under unversioned keys; free that multi-MB row.
+      yield* kv.remove(key.replace("models-dev:v2:", "models-dev:"))
+      yield* kv.remove(`${key.replace("models-dev:v2:", "models-dev:")}:meta`)
 
       const loadFromCache = Effect.fnUntraced(function* () {
         const value = yield* kv.get(key)
         const cached = Schema.decodeUnknownOption(Cache)(value)
         if (Option.isSome(cached))
           return {
-            catalog: cached.value.body as Record<string, SourceProvider>,
+            catalog: cached.value.body,
             updatedAt: cached.value.updatedAt,
             digest: cached.value.digest,
           }
@@ -375,7 +521,7 @@ export const layer = (options?: Options) =>
       })
 
       const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* (etag?: string) {
-        return yield* HttpClientRequest.get(`${source}/api.json`).pipe(
+        return yield* HttpClientRequest.get(`${source}${catalogPath}`).pipe(
           HttpClientRequest.setHeader("User-Agent", userAgent),
           HttpClientRequest.setHeaders(etag ? { "If-None-Match": etag } : {}),
           http.execute,
@@ -386,7 +532,7 @@ export const layer = (options?: Options) =>
 
       const loadFromFile = options?.file
         ? fs.readJson(options.file).pipe(
-            Effect.map((input) => input as Record<string, SourceProvider>),
+            Effect.flatMap((input) => Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.Unknown))(input)),
             Effect.orElseSucceed(() => undefined),
           )
         : Effect.undefined
@@ -400,7 +546,7 @@ export const layer = (options?: Options) =>
 
       // Best-effort: a cache-write failure must never kill catalog
       // population. The payload has outgrown some KV backends' per-value
-      // limits (Durable Object SQLite caps values at 2 MB and api.json
+      // limits (Durable Object SQLite caps values at 2 MB and the catalog
       // passed it in Aug 2026); a boot without a cache hit just refetches.
       const writeCache = Effect.fn("ModelsDev.writeCache")(function* (
         text: string,
