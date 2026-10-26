@@ -184,6 +184,33 @@ export type MoneyUSDPerMillionTokens = number
 
 export type GenerateTextResponse = { data: { text: string } }
 
+export type GenerateBase64Media = { type: "base64"; mediaType: string; data: string }
+
+export type GenerateMediaUsage =
+  | { type: "tokens"; input?: number; output?: number; total?: number }
+  | { type: "credits"; credits: number }
+  | { type: "compute"; seconds: number }
+
+export type GenerateNotice = { type: "moderated" | "filtered" | "other"; message: string }
+
+export type GenerateProviderMetadata = { [x: string]: { [x: string]: JsonValue } }
+
+export type GeneratePredicateAnswer = { type: "predicate"; name: string; probability: number }
+
+export type GenerateChoiceValue = string | boolean
+
+export type GenerateScoreAnswer = {
+  type: "score"
+  name: string
+  score: number
+  probabilities: Array<{ value: number; label: string; probability: number }>
+  confidence: number
+}
+
+export type GenerateErrorAnswer = { type: "error"; name: string; reason: "refusal" }
+
+export type GenerateTokenUsage = { inputTokens?: number; outputTokens?: number; totalTokens?: number; cost?: number }
+
 export type VoiceTransportType = "webrtc" | "websocket"
 
 export type VoiceWebRTCTransport = { type: "webrtc"; sdp: string }
@@ -648,6 +675,21 @@ export type ModelCost = {
   input: MoneyUSDPerMillionTokens
   output: MoneyUSDPerMillionTokens
   cache: { read: MoneyUSDPerMillionTokens; write: MoneyUSDPerMillionTokens }
+}
+
+export type GenerateImageResult = {
+  images: Array<GenerateBase64Media>
+  usage?: GenerateMediaUsage
+  notices?: Array<GenerateNotice>
+  providerMetadata?: GenerateProviderMetadata
+}
+
+export type GenerateChoiceAnswer = {
+  type: "choice"
+  name: string
+  choice: GenerateChoiceValue
+  probabilities: Array<{ value: GenerateChoiceValue; probability: number }>
+  confidence: number
 }
 
 export type VoiceModel = { model: string; provider: string; transports: Array<VoiceTransportType>; available: boolean }
@@ -1997,6 +2039,14 @@ export type FormState =
   | { status: "answered"; answer: FormAnswer }
   | { status: "cancelled"; message?: string }
 
+export type GenerateImageResponse = { data: GenerateImageResult }
+
+export type GenerateDecisionAnswer =
+  | GeneratePredicateAnswer
+  | GenerateChoiceAnswer
+  | GenerateScoreAnswer
+  | GenerateErrorAnswer
+
 export type VoiceModelsResponse = { data: { models: Array<VoiceModel>; default?: string | undefined } }
 
 export type VoiceSessionResponse = { data: { transport: VoiceTransport } }
@@ -2406,6 +2456,12 @@ export type SessionMessageAssistantTool1 = {
 
 export type FormFields = [FormField, ...Array<FormField>]
 
+export type GenerateDecisionResult = {
+  answers: Array<GenerateDecisionAnswer>
+  usage?: GenerateTokenUsage
+  providerMetadata?: GenerateProviderMetadata
+}
+
 export type CredentialEntry = {
   id: CredentialID
   integrationID: IntegrationID
@@ -2507,6 +2563,8 @@ export type IntegrationOAuthMethod = { id: IntegrationMethodID; type: "oauth"; l
 export type IntegrationKeyMethod = { type: "key"; label?: string; form?: FormFields }
 
 export type IntegrationExternalMethod = { id: IntegrationMethodID; type: "external"; label: string; form?: FormFields }
+
+export type GenerateDecisionsResponse = { data: GenerateDecisionResult }
 
 export type FormInfo1 = { id: FormID; sessionID: string; title: string; metadata?: FormMetadata1; fields: FormFields2 }
 
@@ -2858,6 +2916,40 @@ export type ProviderNotFoundError = {
 }
 export const isProviderNotFoundError = (value: unknown): value is ProviderNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ProviderNotFoundError"
+
+export type ModelNotFoundError = {
+  readonly _tag: "ModelNotFoundError"
+  readonly providerID: string
+  readonly modelID: string
+  readonly message: string
+}
+export const isModelNotFoundError = (value: unknown): value is ModelNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ModelNotFoundError"
+
+export type UnsupportedModelError = {
+  readonly _tag: "UnsupportedModelError"
+  readonly providerID: string
+  readonly modelID: string
+  readonly capability: string
+  readonly message: string
+}
+export const isUnsupportedModelError = (value: unknown): value is UnsupportedModelError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "UnsupportedModelError"
+
+export type NotImplementedError = { readonly _tag: "NotImplementedError"; readonly message: string }
+export const isNotImplementedError = (value: unknown): value is NotImplementedError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "NotImplementedError"
+
+export type ProviderRequestError = {
+  readonly _tag: "ProviderRequestError"
+  readonly providerID: string
+  readonly reason: "authentication" | "rate_limit" | "content_filter" | "invalid_request" | "overloaded" | "provider"
+  readonly message: string
+  readonly status?: number | undefined
+  readonly retryAfterMs?: number | undefined
+}
+export const isProviderRequestError = (value: unknown): value is ProviderRequestError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ProviderRequestError"
 
 export type IntegrationNotFoundError = {
   readonly _tag: "IntegrationNotFoundError"
@@ -3627,6 +3719,56 @@ export type GenerateTextInput = {
 }
 
 export type GenerateTextOutput = GenerateTextResponse["data"]
+
+export type GenerateImageInput = {
+  readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+  readonly prompt: string
+  readonly images?:
+    | ReadonlyArray<
+        | { readonly type: "base64"; readonly mediaType: string; readonly data: string }
+        | { readonly type: "url"; readonly url: string; readonly mediaType?: string }
+      >
+    | undefined
+  readonly n?: number | undefined
+  readonly aspect?: string | undefined
+  readonly resolution?: string | undefined
+  readonly providerOptions?: { readonly [x: string]: JsonValue } | undefined
+}
+
+export type GenerateImageOutput = GenerateImageResponse["data"]
+
+export type GenerateDecisionsInput = {
+  readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+  readonly input: ReadonlyArray<
+    | { readonly type: "text"; readonly text: string }
+    | { readonly type: "json"; readonly value: JsonValue }
+    | {
+        readonly type: "media"
+        readonly media:
+          | { readonly type: "base64"; readonly mediaType: string; readonly data: string }
+          | { readonly type: "url"; readonly url: string; readonly mediaType?: string }
+        readonly filename?: string
+      }
+  >
+  readonly questions: ReadonlyArray<
+    | { readonly type: "predicate"; readonly name: string; readonly instructions: string }
+    | {
+        readonly type: "choice"
+        readonly name: string
+        readonly instructions: string
+        readonly choices: ReadonlyArray<{ readonly value: string | boolean; readonly description?: string }>
+      }
+    | {
+        readonly type: "score"
+        readonly name: string
+        readonly instructions: string
+        readonly levels: ReadonlyArray<{ readonly label: string; readonly description?: string }>
+      }
+  >
+  readonly providerOptions?: { readonly [x: string]: JsonValue } | undefined
+}
+
+export type GenerateDecisionsOutput = GenerateDecisionsResponse["data"]
 
 export type VoiceModelsOutput = VoiceModelsResponse["data"]
 

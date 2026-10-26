@@ -1,11 +1,32 @@
+import { Generate } from "@opencode/schema/generate"
 import { Model } from "@opencode/schema/model"
 import { Schema } from "effect"
 import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api"
-import { LocationNotFoundError, InvalidRequestError, ServiceUnavailableError } from "../errors.js"
+import {
+  InvalidRequestError,
+  LocationNotFoundError,
+  ModelNotFoundError,
+  NotImplementedError,
+  ProviderNotFoundError,
+  ProviderRequestError,
+  ServiceUnavailableError,
+  UnsupportedModelError,
+} from "../errors.js"
+
+const mediaErrors = [
+  InvalidRequestError,
+  ProviderNotFoundError,
+  ModelNotFoundError,
+  UnsupportedModelError,
+  ProviderRequestError,
+  ServiceUnavailableError,
+  NotImplementedError,
+  LocationNotFoundError,
+]
 
 export const GenerateGroup = HttpApiGroup.make("server.generate")
   .add(
-    HttpApiEndpoint.post("generate.text", "/api/experimental/generate", {
+    HttpApiEndpoint.post("generate.text", "/api/experimental/generate/text", {
       payload: Schema.Struct({
         prompt: Schema.String,
         model: Model.Ref.pipe(Schema.optional),
@@ -20,6 +41,34 @@ export const GenerateGroup = HttpApiGroup.make("server.generate")
         summary: "Generate text",
         description:
           "Run one stateless model generation using the server's base configuration and return the assistant text. Uses the base configuration's default model when none is specified.",
+      }),
+    ),
+  )
+  .add(
+    HttpApiEndpoint.post("generate.image", "/api/experimental/generate/image", {
+      payload: Generate.ImageRequest,
+      success: Schema.Struct({ data: Generate.ImageResult }).annotate({ identifier: "GenerateImageResponse" }),
+      error: mediaErrors,
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "experimental.generate.image",
+        summary: "Generate images",
+        description:
+          "Generate or edit images with an image model using the server's base configuration and return them as base64. Stateless: nothing is stored. Not implemented yet; always fails with NotImplementedError.",
+      }),
+    ),
+  )
+  .add(
+    HttpApiEndpoint.post("generate.decisions", "/api/experimental/generate/decisions", {
+      payload: Generate.DecisionRequest,
+      success: Schema.Struct({ data: Generate.DecisionResult }).annotate({ identifier: "GenerateDecisionsResponse" }),
+      error: mediaErrors,
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "experimental.generate.decisions",
+        summary: "Generate decisions",
+        description:
+          "Ask a decision model typed predicate, choice and score questions about the input and return one probability-bearing answer per question, in question order. Stateless: nothing is stored. Not implemented yet; always fails with NotImplementedError.",
       }),
     ),
   )

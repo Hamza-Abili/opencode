@@ -5237,7 +5237,7 @@
         "summary": "Get default model"
       }
     },
-    "/api/experimental/generate": {
+    "/api/experimental/generate/text": {
       "post": {
         "tags": ["generate"],
         "operationId": "experimental.generate.text",
@@ -5319,6 +5319,230 @@
                 },
                 "required": ["prompt"],
                 "additionalProperties": false
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/experimental/generate/image": {
+      "post": {
+        "tags": ["generate"],
+        "operationId": "experimental.generate.image",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "GenerateImageResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateImageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "ProviderNotFoundError | ModelNotFoundError | LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ProviderNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ModelNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "UnsupportedModelError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsupportedModelErrorEncoded"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "NotImplementedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedErrorEncoded"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "ProviderRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Generate or edit images with an image model using the server's base configuration and return them as base64. Stateless: nothing is stored. Not implemented yet; always fails with NotImplementedError.",
+        "summary": "Generate images",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Generate.ImageRequest"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/experimental/generate/decisions": {
+      "post": {
+        "tags": ["generate"],
+        "operationId": "experimental.generate.decisions",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "GenerateDecisionsResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateDecisionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "ProviderNotFoundError | ModelNotFoundError | LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ProviderNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ModelNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "UnsupportedModelError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsupportedModelErrorEncoded"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "NotImplementedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotImplementedErrorEncoded"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "ProviderRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Ask a decision model typed predicate, choice and score questions about the input and return one probability-bearing answer per question, in question order. Stateless: nothing is stored. Not implemented yet; always fails with NotImplementedError.",
+        "summary": "Generate decisions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Generate.DecisionRequest"
               }
             }
           },
@@ -16551,6 +16775,583 @@
         "required": ["_tag", "id", "message"],
         "additionalProperties": false
       },
+      "Generate.Base64Media": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["base64"]
+          },
+          "mediaType": {
+            "type": "string",
+            "description": "IANA media type, for example image/png"
+          },
+          "data": {
+            "type": "string",
+            "description": "Base64 payload without a data: URL prefix"
+          }
+        },
+        "required": ["type", "mediaType", "data"],
+        "additionalProperties": false
+      },
+      "Generate.ChoiceAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["choice"]
+          },
+          "name": {
+            "type": "string"
+          },
+          "choice": {
+            "$ref": "#/components/schemas/Generate.ChoiceValue"
+          },
+          "probabilities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "$ref": "#/components/schemas/Generate.ChoiceValue"
+                },
+                "probability": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "required": ["value", "probability"],
+              "additionalProperties": false
+            }
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": ["type", "name", "choice", "probabilities", "confidence"],
+        "additionalProperties": false
+      },
+      "Generate.ChoiceQuestion": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["choice"]
+          },
+          "name": {
+            "type": "string",
+            "description": "Unique within the request; echoed on the matching answer"
+          },
+          "instructions": {
+            "type": "string"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "$ref": "#/components/schemas/Generate.ChoiceValue"
+                },
+                "description": {
+                  "type": "string"
+                }
+              },
+              "required": ["value"],
+              "additionalProperties": false
+            },
+            "minItems": 1
+          }
+        },
+        "required": ["type", "name", "instructions", "choices"],
+        "additionalProperties": false,
+        "description": "Pick one value from a fixed set"
+      },
+      "Generate.ChoiceValue": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "boolean"
+          }
+        ],
+        "description": "Choice values are typed: true and \"true\" are different values"
+      },
+      "Generate.DecisionAnswer": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/Generate.PredicateAnswer"
+          },
+          {
+            "$ref": "#/components/schemas/Generate.ChoiceAnswer"
+          },
+          {
+            "$ref": "#/components/schemas/Generate.ScoreAnswer"
+          },
+          {
+            "$ref": "#/components/schemas/Generate.ErrorAnswer"
+          }
+        ]
+      },
+      "Generate.DecisionJsonPart": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["json"]
+          },
+          "value": {}
+        },
+        "required": ["type", "value"],
+        "additionalProperties": false
+      },
+      "Generate.DecisionMediaPart": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["media"]
+          },
+          "media": {
+            "$ref": "#/components/schemas/Generate.Media"
+          },
+          "filename": {
+            "type": "string"
+          }
+        },
+        "required": ["type", "media"],
+        "additionalProperties": false
+      },
+      "Generate.DecisionPart": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/Generate.DecisionTextPart"
+          },
+          {
+            "$ref": "#/components/schemas/Generate.DecisionJsonPart"
+          },
+          {
+            "$ref": "#/components/schemas/Generate.DecisionMediaPart"
+          }
+        ]
+      },
+      "Generate.DecisionQuestion": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/Generate.PredicateQuestion"
+          },
+          {
+            "$ref": "#/components/schemas/Generate.ChoiceQuestion"
+          },
+          {
+            "$ref": "#/components/schemas/Generate.ScoreQuestion"
+          }
+        ]
+      },
+      "Generate.DecisionRequest": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "$ref": "#/components/schemas/Model.Ref"
+          },
+          "input": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Generate.DecisionPart"
+            },
+            "description": "The evidence every question is asked about, in order"
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Generate.DecisionQuestion"
+            },
+            "minItems": 1
+          },
+          "providerOptions": {
+            "$ref": "#/components/schemas/Generate.ProviderOptions"
+          }
+        },
+        "required": ["model", "input", "questions"],
+        "additionalProperties": false
+      },
+      "Generate.DecisionResult": {
+        "type": "object",
+        "properties": {
+          "answers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Generate.DecisionAnswer"
+            },
+            "description": "One answer per question, in question order"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Generate.TokenUsage"
+          },
+          "providerMetadata": {
+            "$ref": "#/components/schemas/Generate.ProviderMetadata"
+          }
+        },
+        "required": ["answers"],
+        "additionalProperties": false
+      },
+      "Generate.DecisionTextPart": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["text"]
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": ["type", "text"],
+        "additionalProperties": false
+      },
+      "Generate.ErrorAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["error"]
+          },
+          "name": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "enum": ["refusal"]
+          }
+        },
+        "required": ["type", "name", "reason"],
+        "additionalProperties": false,
+        "description": "The provider declined this one question; the other answers still came back"
+      },
+      "Generate.ImageRequest": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "$ref": "#/components/schemas/Model.Ref"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Generate.Media"
+            }
+          },
+          "n": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "aspect": {
+            "type": "string"
+          },
+          "resolution": {
+            "type": "string"
+          },
+          "providerOptions": {
+            "$ref": "#/components/schemas/Generate.ProviderOptions"
+          }
+        },
+        "required": ["model", "prompt"],
+        "additionalProperties": false
+      },
+      "Generate.ImageResult": {
+        "type": "object",
+        "properties": {
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Generate.Base64Media"
+            }
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Generate.MediaUsage"
+          },
+          "notices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Generate.Notice"
+            }
+          },
+          "providerMetadata": {
+            "$ref": "#/components/schemas/Generate.ProviderMetadata"
+          }
+        },
+        "required": ["images"],
+        "additionalProperties": false
+      },
+      "Generate.Media": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/Generate.Base64Media"
+          },
+          {
+            "$ref": "#/components/schemas/Generate.UrlMedia"
+          }
+        ]
+      },
+      "Generate.MediaUsage": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["tokens"]
+              },
+              "input": {
+                "type": "number"
+              },
+              "output": {
+                "type": "number"
+              },
+              "total": {
+                "type": "number"
+              }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["credits"]
+              },
+              "credits": {
+                "type": "number"
+              }
+            },
+            "required": ["type", "credits"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["compute"]
+              },
+              "seconds": {
+                "type": "number"
+              }
+            },
+            "required": ["type", "seconds"],
+            "additionalProperties": false
+          }
+        ],
+        "description": "How the provider metered the request"
+      },
+      "Generate.Notice": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["moderated", "filtered", "other"]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["type", "message"],
+        "additionalProperties": false,
+        "description": "A partial result the provider reported, such as fewer images than requested after moderation"
+      },
+      "Generate.PredicateAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["predicate"]
+          },
+          "name": {
+            "type": "string"
+          },
+          "probability": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": ["type", "name", "probability"],
+        "additionalProperties": false
+      },
+      "Generate.PredicateQuestion": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["predicate"]
+          },
+          "name": {
+            "type": "string",
+            "description": "Unique within the request; echoed on the matching answer"
+          },
+          "instructions": {
+            "type": "string"
+          }
+        },
+        "required": ["type", "name", "instructions"],
+        "additionalProperties": false,
+        "description": "The probability that a statement is true"
+      },
+      "Generate.ProviderMetadata": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object"
+        },
+        "description": "Provider-specific response details, keyed by provider"
+      },
+      "Generate.ProviderOptions": {
+        "type": "object",
+        "description": "Options passed through to the resolved provider unchanged"
+      },
+      "Generate.ScoreAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["score"]
+          },
+          "name": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number",
+            "description": "Probability-weighted level index, so it can fall between levels"
+          },
+          "probabilities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "integer"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "probability": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "required": ["value", "label", "probability"],
+              "additionalProperties": false
+            }
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": ["type", "name", "score", "probabilities", "confidence"],
+        "additionalProperties": false
+      },
+      "Generate.ScoreQuestion": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["score"]
+          },
+          "name": {
+            "type": "string",
+            "description": "Unique within the request; echoed on the matching answer"
+          },
+          "instructions": {
+            "type": "string"
+          },
+          "levels": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                }
+              },
+              "required": ["label"],
+              "additionalProperties": false
+            },
+            "minItems": 1
+          }
+        },
+        "required": ["type", "name", "instructions", "levels"],
+        "additionalProperties": false,
+        "description": "Place the input on ordered levels, lowest first"
+      },
+      "Generate.TokenUsage": {
+        "type": "object",
+        "properties": {
+          "inputTokens": {
+            "type": "number"
+          },
+          "outputTokens": {
+            "type": "number"
+          },
+          "totalTokens": {
+            "type": "number"
+          },
+          "cost": {
+            "type": "number"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Generate.UrlMedia": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["url"]
+          },
+          "url": {
+            "type": "string",
+            "description": "http(s) URL the server downloads before calling the provider"
+          },
+          "mediaType": {
+            "type": "string"
+          }
+        },
+        "required": ["type", "url"],
+        "additionalProperties": false
+      },
+      "GenerateDecisionsResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Generate.DecisionResult"
+          }
+        },
+        "required": ["data"],
+        "additionalProperties": false
+      },
+      "GenerateImageResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Generate.ImageResult"
+          }
+        },
+        "required": ["data"],
+        "additionalProperties": false
+      },
       "GenerateTextResponse": {
         "type": "object",
         "properties": {
@@ -17965,11 +18766,45 @@
         "required": ["id"],
         "additionalProperties": false
       },
+      "ModelNotFoundErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["ModelNotFoundError"]
+          },
+          "providerID": {
+            "type": "string"
+          },
+          "modelID": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "providerID", "modelID", "message"],
+        "additionalProperties": false
+      },
       "Money.USD": {
         "type": "number"
       },
       "Money.USDPerMillionTokens": {
         "type": "number"
+      },
+      "NotImplementedErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["NotImplementedError"]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "message"],
+        "additionalProperties": false
       },
       "PairingCode": {
         "type": "object",
@@ -19026,6 +19861,47 @@
           }
         },
         "required": ["_tag", "providerID", "message"],
+        "additionalProperties": false
+      },
+      "ProviderRequestErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["ProviderRequestError"]
+          },
+          "providerID": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "enum": ["authentication", "rate_limit", "content_filter", "invalid_request", "overloaded", "provider"]
+          },
+          "message": {
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retryAfterMs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["_tag", "providerID", "reason", "message"],
         "additionalProperties": false
       },
       "Pty": {
@@ -21233,6 +22109,29 @@
           }
         },
         "required": ["_tag", "message"],
+        "additionalProperties": false
+      },
+      "UnsupportedModelErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["UnsupportedModelError"]
+          },
+          "providerID": {
+            "type": "string"
+          },
+          "modelID": {
+            "type": "string"
+          },
+          "capability": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "providerID", "modelID", "capability", "message"],
         "additionalProperties": false
       },
       "UsageLimits.Budget": {

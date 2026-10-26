@@ -271,7 +271,7 @@ Review endpoints in document order. For each endpoint, select one disposition an
 
 | Done | Method | Path | Operation ID | Decision | Notes |
 |---|---|---|---|---|---|
-| [x] 138 | `POST` | `/api/experimental/generate` | `experimental.generate.text` | Experimental-only | Stateless generation retained alongside session generation. |
+| [x] 138 | `POST` | `/api/experimental/generate/text` | `experimental.generate.text` | Experimental-only | Stateless generation retained alongside session generation. |
 | [x] 139 | `POST` | `/api/rpc/{rpcID}/{method}` | `rpc.call` | Keep | Generic typed-error plugin RPC transport retained. |
 | [x] 140 | `GET` | `/api/event` | `event.subscribe` | Keep | Unified native and dynamic plugin event stream retained. |
 | [x] 141 | `GET` | `/api/debug/location` | `debug.location.list` | Keep | Loaded-location debug inventory retained. |
