@@ -204,6 +204,10 @@ import type {
   RpcCallInput,
   RpcCallOutput,
   EventSubscribeOutput,
+  EventExperimentalSubscribeInput,
+  EventExperimentalSubscribeOutput,
+  EventExperimentalSessionsInput,
+  EventExperimentalSessionsOutput,
   PtyListInput,
   PtyListOutput,
   PtyCreateInput,
@@ -1816,6 +1820,35 @@ export function make(options: ClientOptions) {
           { method: "GET", path: `/api/event`, successStatus: 200, declaredStatuses: [400, 401], empty: false },
           requestOptions,
         ),
+      experimental: {
+        subscribe: (
+          input?: EventExperimentalSubscribeInput,
+          requestOptions?: RequestOptions,
+        ): AsyncIterable<EventExperimentalSubscribeOutput> =>
+          sse<EventExperimentalSubscribeOutput>(
+            {
+              method: "GET",
+              path: `/api/experimental/event`,
+              query: { detail: input?.["detail"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ),
+        sessions: (input: EventExperimentalSessionsInput, requestOptions?: RequestOptions) =>
+          request<EventExperimentalSessionsOutput>(
+            {
+              method: "PUT",
+              path: `/api/experimental/event/${encodeURIComponent(input.connection)}/sessions`,
+              body: { sessions: input["sessions"] },
+              successStatus: 204,
+              declaredStatuses: [400, 401, 404],
+              empty: true,
+            },
+            requestOptions,
+          ),
+      },
     },
     pty: {
       list: (input?: PtyListInput, requestOptions?: RequestOptions) =>

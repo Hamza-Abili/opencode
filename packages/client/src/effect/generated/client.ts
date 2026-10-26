@@ -206,6 +206,10 @@ import type {
   RpcCallInput,
   RpcCallOutput,
   EventSubscribeOutput,
+  EventExperimentalSubscribeInput,
+  EventExperimentalSubscribeOutput,
+  EventExperimentalSessionsInput,
+  EventExperimentalSessionsOutput,
   PtyListInput,
   PtyListOutput,
   PtyCreateInput,
@@ -1336,7 +1340,32 @@ const EndpointEventSubscribe = (raw: RawClient["server.event"]) => () =>
     ),
   )
 
-const adaptGroupEvent = (raw: RawClient["server.event"]) => ({ subscribe: EndpointEventSubscribe(raw) })
+const EndpointEventExperimentalSubscribe =
+  (raw: RawClient["server.event"]) => (input?: EventExperimentalSubscribeInput) =>
+    preserveStream<EventExperimentalSubscribeOutput>()(
+      Stream.unwrap(
+        raw["event.experimental.subscribe"]({ query: { detail: input?.["detail"] } }).pipe(
+          Effect.mapError(mapClientError),
+          Effect.map((stream) => stream.pipe(Stream.mapError(mapClientError))),
+        ),
+      ),
+    )
+
+const EndpointEventExperimentalSessions = (raw: RawClient["server.event"]) => (input: EventExperimentalSessionsInput) =>
+  preserveEffect<EventExperimentalSessionsOutput>()(
+    raw["event.experimental.sessions"]({
+      params: { connection: input["connection"] },
+      payload: { sessions: input["sessions"] },
+    }).pipe(Effect.mapError(mapClientError)),
+  )
+
+const adaptGroupEvent = (raw: RawClient["server.event"]) => ({
+  subscribe: EndpointEventSubscribe(raw),
+  experimental: {
+    subscribe: EndpointEventExperimentalSubscribe(raw),
+    sessions: EndpointEventExperimentalSessions(raw),
+  },
+})
 
 const EndpointPtyList = (raw: RawClient["server.pty"]) => (input?: PtyListInput) =>
   preserveEffect<PtyListOutput>()(
