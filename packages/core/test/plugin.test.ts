@@ -655,8 +655,7 @@ it.effect("host event subscriptions deliver requested rpc types and ignore unkno
     const fiber = yield* host.event
       // @ts-expect-error untyped JavaScript plugins can still pass unknown type names
       .subscribe({ types: ["rpc.test.ping", "test.unknown"] })
-      .pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped)
-    yield* Effect.yieldNow
+      .pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped({ startImmediately: true }))
 
     yield* bus.publish(Event.Updated, {})
     yield* bus.publish(Rpc.eventDefinition("rpc.test.ping"), { value: 1 })
