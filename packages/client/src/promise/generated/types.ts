@@ -122,6 +122,8 @@ export type SessionStructuredError = {
 
 export type SessionActive = { type: "running" }
 
+export type EventSeq = number
+
 export type SessionInboxDelivery = "steer" | "queue"
 
 export type SessionInboxSyntheticPayload = { text: string; description?: string; metadata?: { [x: string]: JsonValue } }
@@ -133,8 +135,6 @@ export type InstructionEntryKey = string
 export type SessionGenerateResponse = { data: { text: string } }
 
 export type EventID = string
-
-export type EventSeq = number
 
 export type WorkspaceID = string
 
@@ -510,6 +510,10 @@ export type SessionMessageIdle = {
   error?: SessionStructuredError
 }
 
+export type SessionHead = { seq: EventSeq; running: boolean }
+
+export type EventLogSynced = { type: "log.synced"; aggregateID: string; seq?: EventSeq }
+
 export type SessionInboxSynthetic = {
   id: SessionMessageID
   sessionID: SessionID
@@ -531,8 +535,6 @@ export type SessionInboxCompaction = {
 export type InstructionEntryInfo = { key: InstructionEntryKey; value: JsonValue }
 
 export type InstructionEntrySnapshot = Array<{ key: InstructionEntryKey; value: JsonValue; removed: boolean }>
-
-export type EventLogSynced = { type: "log.synced"; aggregateID: string; seq?: EventSeq }
 
 export type LocationRef = { directory: AbsolutePath; workspaceID?: WorkspaceID }
 
@@ -2554,6 +2556,7 @@ export type SessionTransferData = { info: SessionInfo; messages: Array<SessionMe
 export type SessionMessagesResponse = {
   data: Array<SessionMessageInfo>
   cursor: { previous?: string | null; next?: string | null }
+  seq?: EventSeq | null
 }
 
 export type SessionEventDurable =
@@ -3452,6 +3455,10 @@ export type SessionExportInput = {
 export type SessionExportOutput = { data: SessionTransferData }["data"]
 
 export type SessionActiveOutput = { data: { [x: SessionID]: SessionActive } }["data"]
+
+export type SessionHeadsInput = { readonly sessions?: { readonly sessions?: string | undefined }["sessions"] }
+
+export type SessionHeadsOutput = { [x: SessionID]: SessionHead }
 
 export type SessionGetInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
 
