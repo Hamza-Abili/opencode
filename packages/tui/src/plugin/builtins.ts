@@ -1,6 +1,7 @@
 import HomeFooter from "../feature-plugins/home/footer"
 import PromptBtw from "../feature-plugins/prompt/btw"
 import PromptFooter from "../feature-plugins/prompt/footer"
+import PromptGoal from "../feature-plugins/prompt/goal"
 import SidebarContext from "../feature-plugins/sidebar/context"
 import SidebarFooter from "../feature-plugins/sidebar/footer"
 import SidebarLimit from "../feature-plugins/sidebar/limit"
@@ -17,6 +18,7 @@ import Merman from "@opencode/merman/plugin"
 export const builtins = [
   HomeFooter,
   PromptFooter,
+  PromptGoal,
   PromptBtw,
   SidebarContext,
   SidebarLimit,
