@@ -99,6 +99,18 @@ it.live("rejects image and decision generation until they are implemented", () =
       expect(response.status).toBe(501)
       expect(yield* Effect.promise(() => response.json())).toMatchObject({ _tag: "NotImplementedError" })
     }
+
+    const question = { type: "predicate", name: "refund", instructions: "Is this a refund request?" }
+    const duplicate = yield* Effect.promise(() =>
+      handler(
+        new Request("http://opencode.local/api/experimental/generate/decisions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model, input: [], questions: [question, question] }),
+        }),
+      ),
+    )
+    expect(duplicate.status).toBe(400)
   }),
 )
 
