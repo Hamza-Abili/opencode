@@ -232,6 +232,7 @@ test.describe("timeline history", () => {
       const roots: { sessionID: string; messageID: string }[] = []
       const sequence: string[] = []
       const messages = rootHistory()
+      // SAFETY: rootHistory ends each generated turn with an assistant message.
       const last = messages.at(-1) as SessionMessageAssistant
       await page.addInitScript(installVisibilityProbe)
 
@@ -282,8 +283,9 @@ test.describe("timeline history", () => {
       const completed = {
         ...last,
         time: { ...last.time, completed: last.time.created + 15_000 },
-        ...(scenario.error ? { error: scenario.error } : {}),
       }
+
+      if (scenario.error) completed.error = scenario.error
 
       const message = messageUpdated(completed)
       const idle = status("idle")
@@ -327,16 +329,16 @@ test.describe("timeline history", () => {
     })
   }
 
-  for (const shape of ["assistant-only", "mixed"] as const) {
-    test(`renders the ${shape} tail before parent hydration and preserves it afterward`, async ({ page }) => {
-      const session = { ...fixture.sessions[0]!, id: `ses_hydration_${shape}` }
+  for (const composition of ["assistant-only", "mixed"] as const) {
+    test(`renders the ${composition} tail before parent hydration and preserves it afterward`, async ({ page }) => {
+      const session = { ...fixture.sessions[0]!, id: `ses_hydration_${composition}` }
 
       // Compact's initial 40 and the next 20 begin with an assistant; page three supplies its parent.
       const messages = Array.from({ length: 61 }, (_, index): SessionMessageInfo => {
         const id = `msg_hydration_${index}`
         const time = { created: 1700000000000 + index * 1_000 }
 
-        if (index === 0 || (shape === "mixed" && index === 59))
+        if (index === 0 || (composition === "mixed" && index === 59))
           return { id, type: "user", time, text: `Prompt ${index}` }
 
         return {
@@ -407,7 +409,7 @@ test.describe("timeline history", () => {
         await expectReadyTail()
         await expect(orphan).toHaveAttribute("data-message-id", "msg_hydration_21")
 
-        if (shape === "mixed")
+        if (composition === "mixed")
           await expect(
             page.locator('[data-timeline-row="UserMessage"][data-message-id="msg_hydration_59"]'),
           ).toBeInViewport()
@@ -573,6 +575,7 @@ function installVisibilityProbe() {
       .flatMap((part) => (part.dataset.timelinePartId ? [part.dataset.timelinePartId] : []))
   }
 
+  // SAFETY: arm populates parts with visible part IDs; settle supplies the optional final state.
   const state = {
     armed: false,
     hidden: false,
