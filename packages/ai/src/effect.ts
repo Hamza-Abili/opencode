@@ -4,12 +4,7 @@ export { ImageClient } from "./image-client.js"
 export { Auth } from "./route/auth.js"
 export { ProviderPackage } from "./provider-package.js"
 export { isContextOverflow, isContextOverflowFailure, isRetryable } from "./provider-error.js"
-export type {
-  RouteLanguageModelInput,
-  RouteRoutedLanguageModelInput,
-  Interface as LLMClientShape,
-  LLMClientService,
-} from "./route/client.js"
+export type { Interface as LLMClientShape, LLMClientService } from "./route/client.js"
 export {
   ProtocolID,
   RouteID,
