@@ -14,6 +14,33 @@ const assistant = (id: string): SessionMessageAssistant => ({
 })
 
 describe("timeline model", () => {
+  test("enriches a retained transcript only once, including after an older page changes its leading turn", async () => {
+    const messages: SessionMessageInfo[] = [user("msg_user"), assistant("msg_latest")]
+    let loads = 0
+
+    const input = {
+      current: () => true,
+      messages: () => messages,
+      more: () => true,
+      loading: () => false,
+      loadMore: async () => {
+        loads += 1
+      },
+      pause: async () => undefined,
+      maxPages: 3,
+    }
+
+    await enrichLeadingTurn(input)
+    messages.unshift(assistant("msg_older"))
+    await enrichLeadingTurn(input)
+    expect(loads).toBe(0)
+
+    // An evicted/reloaded transcript gets its own initial enrichment budget.
+    const reloaded = [...messages]
+    await enrichLeadingTurn({ ...input, messages: () => reloaded })
+    expect(loads).toBe(3)
+  })
+
   test.each([
     ["restores the anchor after one opaque cursor page", "ok", ["before", "load", "after", true]],
     ["does not restore an anchor after the session changes", "switch", ["before", "load"]],

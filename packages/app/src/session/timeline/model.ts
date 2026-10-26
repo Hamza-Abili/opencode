@@ -8,6 +8,10 @@ const leadingTurnPageDelay = 200
 
 const leadingTurnPageLimit = 3
 
+// The store preserves the transcript array across prepends and tab switches, and replaces it on eviction.
+// Initial enrichment belongs to that retained transcript, not each activation of its tab.
+const enrichedTranscripts = new WeakSet<SessionMessageInfo[]>()
+
 export function createTimelineModel(input: { session: Pick<SessionModel, "identity" | "history" | "ownership"> }) {
   const data = useData()
 
@@ -86,7 +90,11 @@ export async function enrichLeadingTurn(input: {
   pause: () => Promise<void>
   maxPages: number
 }) {
-  const assistant = input.messages().find((message) => message.type === "assistant")?.id
+  const messages = input.messages()
+
+  if (!input.current() || enrichedTranscripts.has(messages)) return
+  enrichedTranscripts.add(messages)
+  const assistant = messages.find((message) => message.type === "assistant")?.id
 
   if (!assistant) return
 
