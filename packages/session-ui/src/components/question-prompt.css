@@ -123,11 +123,38 @@
     overflow-wrap: anywhere;
   }
 
+  /* Each segment is a 20px button holding a 14px dash, 2px apart, so dashes repeat every 22px from 3px in. */
   [data-slot="question-progress"] {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 2px;
     flex-shrink: 0;
+  }
+
+  /* The current question's bar slides along a strip that shows only through the dashes, never in the gaps. */
+  [data-slot="question-progress-track"] {
+    position: absolute;
+    z-index: 1;
+    inset-inline: 0;
+    inset-block-start: calc(50% - 1px);
+    block-size: 2px;
+    pointer-events: none;
+    -webkit-mask-image: repeating-linear-gradient(to right, transparent 0 3px, #000 3px 17px, transparent 17px 22px);
+    mask-image: repeating-linear-gradient(to right, transparent 0 3px, #000 3px 17px, transparent 17px 22px);
+  }
+
+  [data-slot="question-progress"]:has(:disabled) [data-slot="question-progress-track"] {
+    opacity: 0.5;
+  }
+
+  [data-slot="question-progress-current"] {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: 3px;
+    inline-size: 14px;
+    background-color: var(--v2-icon-icon-base);
+    will-change: transform;
   }
 
   [data-slot="question-progress-segment"] {
@@ -146,10 +173,6 @@
 
     &[data-answered="true"] [data-slot="question-progress-bar"]::before {
       transform: scaleX(1);
-    }
-
-    &[data-active="true"] [data-slot="question-progress-bar"]::after {
-      opacity: 1;
     }
 
     &:focus-visible {
@@ -171,25 +194,15 @@
     overflow: hidden;
     background-color: var(--v2-background-bg-layer-04);
 
-    &::before,
-    &::after {
+    /* Answering fills the segment from its start. */
+    &::before {
       content: "";
       position: absolute;
       inset: 0;
-    }
-
-    /* Answering fills the segment from its start; the current question sits on top in its own colour. */
-    &::before {
       background-color: var(--v2-background-bg-accent);
       transform: scaleX(0);
       transform-origin: left;
       transition: transform var(--question-settle) var(--question-spring);
-    }
-
-    &::after {
-      background-color: var(--v2-icon-icon-muted);
-      opacity: 0;
-      transition: opacity var(--question-quick) var(--question-spring);
     }
 
     &:dir(rtl)::before {
