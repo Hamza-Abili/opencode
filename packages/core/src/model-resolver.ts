@@ -156,6 +156,14 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ModelResolver") {}
 
+const isDisabledBedrockThinking = Schema.is(
+  Schema.Struct({
+    additionalModelRequestFields: Schema.Struct({
+      thinking: Schema.Struct({ type: Schema.Literal("disabled") }),
+    }),
+  }),
+)
+
 // Variant resolution adds request-local overlays without changing the committed model snapshot.
 export const withVariant = (
   model: Info,
@@ -171,6 +179,15 @@ export const withVariant = (
         variant: id,
       }),
     )
+  const merged = variant === undefined ? undefined : Provider.mergeOverlay(model.body, variant.body)
+  const body =
+    merged !== undefined && model.package === "@opencode/ai/providers/amazon-bedrock" && isDisabledBedrockThinking(merged)
+      ? {
+          // Bedrock rejects adaptive-only fields inherited by disabled thinking.
+          ...merged,
+          additionalModelRequestFields: { ...merged.additionalModelRequestFields, thinking: { type: "disabled" } },
+        }
+      : merged
   return Effect.succeed(
     variant
       ? {
@@ -181,7 +198,7 @@ export const withVariant = (
             Provider.modelSettings(variant.settings && Struct.omit(variant.settings, ["cache"])),
           ),
           headers: Provider.mergeHeaders(model.headers, variant.headers),
-          body: Provider.mergeOverlay(model.body, variant.body),
+          body,
         }
       : model,
   )

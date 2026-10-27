@@ -664,6 +664,41 @@ describe("ModelResolver", () => {
     }),
   )
 
+  it.effect("drops adaptive thinking fields when selecting the Bedrock none variant", () =>
+    Effect.gen(function* () {
+      const catalog = model(Provider.aisdk("@ai-sdk/amazon-bedrock"), {
+        modelID: "us.anthropic.claude-haiku-5-5",
+        settings: {
+          reasoningConfig: { type: "adaptive", maxReasoningEffort: "medium", display: "summarized" },
+        },
+      })
+      const configured = Info.make({
+        ...catalog,
+        variants: Variant.resolve(catalog, [{ type: "toggle" }, { type: "effort" }]),
+      })
+      const disabled = yield* ModelResolver.withVariant(configured, VariantID.make("none"))
+      const low = yield* ModelResolver.withVariant(configured, VariantID.make("low"))
+
+      expect(disabled.body?.additionalModelRequestFields).toEqual({
+        thinking: { type: "disabled" },
+        output_config: { effort: "medium" },
+      })
+      const resolved = yield* ModelResolver.resolveModel(configured, VariantID.make("none"))
+      expect(resolved.route.defaults.http?.body).toMatchObject({
+        additionalModelRequestFields: { thinking: { type: "disabled" } },
+      })
+      expect(low.body?.additionalModelRequestFields).toEqual({
+        thinking: { type: "adaptive", display: "summarized" },
+        output_config: { effort: "low" },
+      })
+      expect(catalog.body?.additionalModelRequestFields).toEqual({
+        thinking: { type: "adaptive", display: "summarized" },
+        output_config: { effort: "medium" },
+      })
+      expect(disabled.body?.custom_extension).toEqual({ enabled: true })
+    }),
+  )
+
   it.effect("overlays selected Anthropic variant settings", () =>
     Effect.gen(function* () {
       const catalog = model(Provider.aisdk("@ai-sdk/anthropic"), {
